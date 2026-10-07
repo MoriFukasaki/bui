@@ -35,7 +35,7 @@ import database
 import discogs_client
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FRONTEND_DIR = os.path.abspath(os.path.join(HERE, "../frontend/"))
+FRONTEND_DIR = os.path.abspath(os.path.join(HERE, "frontend"))
 
 SHIPPING_EXPRESS_FEE = 45000
 SHIPPING_STANDARD_FEE = 35000
