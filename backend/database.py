@@ -17,7 +17,11 @@ import sqlite3
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(HERE, "bui_records.db")
+
+if os.environ.get("VERCEL"):
+    DB_PATH = "/tmp/bui_records.db"
+else:
+    DB_PATH = os.path.join(HERE, "bui_records.db")
 
 
 def get_db():
