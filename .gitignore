@@ -1,0 +1,49 @@
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local application data
+*.db
+*.sqlite
+*.sqlite3
+*.log
+backend/*.csv
+
+# Frontend dependencies and build output
+node_modules/
+dist/
+build/
+.parcel-cache/
+.vite/
+
+# Editors and operating-system files
+.idea/
+.vscode/*
+.DS_Store
+Thumbs.db
+Desktop.ini
