@@ -1,49 +1,20 @@
-# Environment variables and local secrets
+# Local credentials and provider links
 .env
 .env.*
 !.env.example
+.neon
 *.pem
 *.key
-*.p12
-*.pfx
-credentials.json
-secrets.json
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-.Python
-.venv/
-venv/
-env/
-ENV/
-build/
-dist/
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-
-# Local application data
-*.db
-*.sqlite
-*.sqlite3
+# Runtime data and generated output
+/data/
+/dist/
+/node_modules/
+/verification/
+/preview.png
+*.zip
+*.mp4
+*.webm
+*.mov
 *.log
-backend/*.csv
-
-# Frontend dependencies and build output
-node_modules/
-dist/
-build/
-.parcel-cache/
-.vite/
-
-# Editors and operating-system files
-.idea/
-.vscode/*
 .DS_Store
 Thumbs.db
-Desktop.ini

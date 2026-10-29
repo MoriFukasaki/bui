@@ -1,0 +1,26 @@
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtemp, copyFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
+const folder = await mkdtemp(join(tmpdir(), 'camroom-publish-proof-'));
+const git = args => execFileSync('git', args, { cwd: folder, stdio: 'pipe' });
+const checker = fileURLToPath(new URL('./check-publish.mjs', import.meta.url));
+await copyFile(new URL('../.gitignore', import.meta.url), join(folder, '.gitignore'));
+await writeFile(join(folder, 'app.js'), 'export const ready = true;\n');
+git(['init']);
+const run = () => spawnSync(process.execPath, [checker], { cwd: folder, encoding: 'utf8' });
+assert.equal(run().status, 0); console.log('PASS publish guard: clean source accepted');
+// Synthetic fixture only. This is deliberately assembled so the fixture source contains no token itself.
+const fakeSecret = ['nsk', 'live', 'A'.repeat(40)].join('_');
+await writeFile(join(folder, 'accidental.js'), `export const credential = '${fakeSecret}';\n`);
+assert.equal(run().status, 1); console.log('PASS publish guard: untracked secret rejected');
+git(['add', 'accidental.js']);
+await writeFile(join(folder, 'accidental.js'), 'export const credential = null;\n');
+assert.equal(run().status, 1); console.log('PASS publish guard: staged secret rejected even when working copy is clean');
+git(['add', 'accidental.js']);
+await writeFile(join(folder, '.env.local'), 'AWS_SECRET_ACCESS_KEY=synthetic-fixture-only\n');
+git(['add', '-f', '.env.local']);
+assert.equal(run().status, 1); console.log('PASS publish guard: force-staged private env rejected');
+console.log('PUBLISH GUARD E2E PASS: clean source and three leak scenarios verified with synthetic fixtures');

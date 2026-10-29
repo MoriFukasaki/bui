@@ -1,5 +1,0 @@
-fastapi>=0.110,<1
-uvicorn[standard]>=0.29,<1
-itsdangerous>=2.2,<3
-python-dotenv>=1.0,<2
-requests>=2.31,<3

@@ -1,0 +1,10 @@
+import { execFileSync } from 'node:child_process';
+import { mkdir, copyFile, readFile, writeFile } from 'node:fs/promises';
+const modules = ['server.mjs', 'recordings.mjs', 'database.mjs', 'env.mjs', 'public/app.js', 'public/recorder.js'];
+for (const file of modules) execFileSync(process.execPath, ['--check', file], { stdio: 'inherit' });
+await mkdir('dist/public', { recursive: true });
+for (const file of [...modules, 'public/index.html', 'public/style.css']) await copyFile(file, `dist/${file}`);
+const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+await writeFile('dist/package.json', JSON.stringify({ name: pkg.name, version: pkg.version, private: true, type: 'module', scripts: { start: 'node server.mjs' }, engines: pkg.engines, dependencies: pkg.dependencies }, null, 2));
+await copyFile('package-lock.json', 'dist/package-lock.json');
+console.log('BUILD PASS: 6 JavaScript modules checked; server + web packaged in dist/ (no secrets).');

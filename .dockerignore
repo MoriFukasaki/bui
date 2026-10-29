@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+.neon
+data
+preview.png
+verification
+node_modules
+test
+*.zip
