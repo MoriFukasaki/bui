@@ -8,6 +8,9 @@ services:
       PORT: 3000
       TURN_URLS: ${TURN_URLS:-}
       TURN_SECRET: ${TURN_SECRET:-}
+      TURN_USERNAME: ${TURN_USERNAME:-}
+      TURN_PASSWORD: ${TURN_PASSWORD:-}
+      ICE_TRANSPORT_POLICY: ${ICE_TRANSPORT_POLICY:-all}
       RECORDING_DIR: /app/data/recordings
     volumes:
       - recording_data:/app/data

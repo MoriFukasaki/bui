@@ -99,6 +99,8 @@ Reverse proxy khác cần tắt buffering `/api/events`, giữ Host đúng, khô
 
 ## Mạng và giới hạn thiết bị
 
+Nếu các máy chỉ thấy một vài camera, đọc [hướng dẫn TURN trên Render](TURN-RENDER.md). Bản mới có tự khôi phục từng cặp, nút Kết nối lại và hỗ trợ `TURN_USERNAME`/`TURN_PASSWORD` của dịch vụ relay. Khi test khác Wi-Fi/4G/5G, cấu hình TURN thật và dùng `ICE_TRANSPORT_POLICY=relay` để xác minh trước khi đổi về `all`.
+
 WebRTC mesh gửi riêng tới từng thiết bị còn lại: 10 máy có thể có 90 luồng video một chiều. Preview mặc định 400 Kbps mỗi bên nhận; gửi 9 bên khoảng 3,6 Mbps chưa tính overhead và upload file ghi. Không bảo đảm mọi điện thoại quay/nhận/phát mượt ở 4K. Thử Wi-Fi, thiết bị, nhiệt và pin trước buổi quay; nhiều máy chất lượng cao nên chuyển sang SFU (bản này chưa có).
 
 Giữ trang foreground, màn hình sáng, không chuyển app/khóa máy. App xin screen wake lock khi được hỗ trợ, nhưng iOS/Android vẫn có thể dừng camera/encoder ở nền. Web không điều khiển được ứng dụng camera khác.

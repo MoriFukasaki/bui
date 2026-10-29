@@ -1,9 +1,10 @@
 import http from 'node:http';
-import { randomBytes, createHmac } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { RecordingStore, storageConfigured, downloadURL } from './recordings.mjs';
 import { databaseEnabled, persistRecording, listRecordings, subscribeRecordings, closeDatabase, getPool } from './database.mjs';
+import { iceConfiguration } from './ice.mjs';
 
 const rooms = new Map(), sessions = new Map(), limits = new Map();
 const publicDir = new URL('./public/', import.meta.url);
@@ -34,14 +35,6 @@ async function body(req) {
   let data = ''; for await (const part of req) { data += part; if (data.length > 65536) throw Error('Dữ liệu quá lớn.'); }
   return JSON.parse(data || '{}');
 }
-function iceServers() {
-  const list = [{ urls: 'stun:stun.l.google.com:19302' }];
-  if (process.env.TURN_URLS && process.env.TURN_SECRET) {
-    const username = `${Math.floor(Date.now() / 1000) + 86400}:camroom`;
-    list.push({ urls: process.env.TURN_URLS.split(','), username, credential: createHmac('sha1', process.env.TURN_SECRET).update(username).digest('base64') });
-  }
-  return list;
-}
 export const server = http.createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
@@ -51,12 +44,13 @@ export const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
     if (req.method === 'POST' && req.headers.origin && req.headers.origin !== `http://${req.headers.host}` && req.headers.origin !== `https://${req.headers.host}`) return send(res, 403, { error: 'Origin không hợp lệ.' });
-    if (req.method === 'GET' && ['/', '/app.js', '/style.css', '/recorder.js'].includes(url.pathname)) {
+    if (req.method === 'GET' && ['/', '/app.js', '/style.css', '/recorder.js', '/mesh.js'].includes(url.pathname)) {
       const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
       const data = await readFile(new URL(name, publicDir));
       res.writeHead(200, { 'Content-Type': name.endsWith('.html') ? 'text/html; charset=utf-8' : name.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8' }); return res.end(data);
     }
     if (req.method === 'POST' && url.pathname === '/api/join') {
+      const ice = iceConfiguration();
       const ip = req.socket.remoteAddress, now = Date.now();
       const limit = limits.get(ip) || { start: now, count: 0 }; if (now - limit.start > 60000) { limit.start = now; limit.count = 0; }
       limits.set(ip, limit); if (++limit.count > 60) return send(res, 429, { error: 'Thử lại sau một phút.' });
@@ -83,7 +77,7 @@ export const server = http.createServer(async (req, res) => {
           room.cloudStatus = state.status; broadcast(room, 'cloud-status', { status: state.status });
         }).then(close => { if (rooms.has(room.code)) room.closeRealtime = close; else close(); }).catch(() => broadcast(room, 'cloud-status', { status: 'error' }));
       }
-      return send(res, 200, { ...info(p), token, code: room.code, maxCameras: room.maxCameras, iceServers: iceServers(), ...roomState(room) });
+      return send(res, 200, { ...info(p), token, code: room.code, maxCameras: room.maxCameras, ...ice, ...roomState(room) });
     }
     // Upload capabilities are separate from room sessions, so a stopped recording can finish after leaving/restarting.
     const uploadRoute = /^\/api\/uploads\/([a-f0-9]{32})\/(chunk|complete|status)$/.exec(url.pathname);
@@ -180,11 +174,13 @@ export const server = http.createServer(async (req, res) => {
       p.room.live = id; broadcast(p.room, 'live', { id }); return send(res, 200, {});
     }
     if (req.method === 'POST' && url.pathname === '/api/signal') {
-      const { to, sender, description, candidate } = await body(req);
+      const { to, sender, description, candidate, connectionId, restart, relay } = await body(req);
       const target = p.room.peers.get(to);
       if (!target) return send(res, 404, { error: 'Thiết bị đã rời phòng.' });
       if (sender !== p.id && sender !== to) return send(res, 400, { error: 'Tín hiệu không hợp lệ.' });
-      event(target, 'signal', { from: p.id, sender, description, candidate }); return send(res, 200, {});
+      if (connectionId !== undefined && (typeof connectionId !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(connectionId))) return send(res, 400, { error: 'Phiên kết nối camera không hợp lệ.' });
+      if (restart && (sender !== to || target.role !== 'camera')) return send(res, 400, { error: 'Yêu cầu kết nối lại không hợp lệ.' });
+      event(target, 'signal', { from: p.id, sender, description, candidate, connectionId, restart: Boolean(restart), relay: Boolean(relay) }); return send(res, 200, {});
     }
     send(res, 404, { error: 'Không tìm thấy.' });
   } catch { if (!res.headersSent) send(res, 400, { error: 'Yêu cầu không hợp lệ.' }); else res.end(); }
@@ -195,6 +191,8 @@ const housekeeping = setInterval(() => {
 }, 15000);
 housekeeping.unref();
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const ice = iceConfiguration();
+  console.log(ice.turnConfigured ? `Camera relay: configured (${ice.iceTransportPolicy})` : 'Camera relay: not configured; different networks may need TURN');
   if (databaseEnabled()) { await getPool().query('SELECT id FROM camroom_recordings LIMIT 0'); console.log('Postgres: connected; recording schema ready'); }
   server.listen(Number(process.env.PORT || 3000), '0.0.0.0', () => console.log(`Camroom: http://localhost:${process.env.PORT || 3000}`));
   const shutdown = () => { server.closeAllConnections(); server.close(); closeDatabase().finally(() => process.exit()); };

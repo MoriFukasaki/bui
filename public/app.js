@@ -1,7 +1,9 @@
 import { createRecordingController, supportedMime } from './recorder.js';
+import { CameraMesh } from './mesh.js';
 const $ = id => document.getElementById(id);
 let me = null, stream = null, controller = null, wake = null, facing = 'environment', paused = false, joining = false;
-const peers = new Map(), outgoing = new Map(), incoming = new Map(), pending = new Map();
+const peers = new Map();
+let mesh = null;
 let liveId = null, signalQueue = Promise.resolve();
 let armed = false, clockOffset = 0, hostId = null, currentTake = null, storageReady = false, takeTimer;
 let cameraOptions = { bitrate: 5000000, previewBitrate: 400000, audio: false };
@@ -17,7 +19,7 @@ if (shareCode) $('room-code').value = shareCode;
 $('name').value = localStorage.getItem('camroom-name') || '';
 
 async function api(path, data, session = me) {
-  const res = await fetch(`/api/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(session ? { Authorization: `Bearer ${session.token}` } : {}) }, body: JSON.stringify(data) });
+  const res = await fetch(`/api/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(session ? { Authorization: `Bearer ${session.token}` } : {}) }, body: JSON.stringify(data), signal: AbortSignal.timeout(path === 'signal' ? 10000 : 30000) });
   const result = await res.json(); if (!res.ok) throw Error(result.error || 'Không kết nối được máy chủ.'); return result;
 }
 function captureConstraints(max = 3) {
@@ -43,6 +45,10 @@ async function join(create = false) {
       stream = await navigator.mediaDevices.getUserMedia(captureConstraints(create ? Number($('max-cameras').value) : 10));
     }
     me = await api('join', { create, code, role, name: $('name').value, maxCameras: Number($('max-cameras').value) }, null);
+    const session = me;
+    mesh = new CameraMesh({ selfId: me.id, peers, getStream: () => stream, getConfiguration: () => session,
+      getPreview: () => ({ bitrate: cameraOptions.previewBitrate, fps: me?.maxCameras > 3 ? 15 : 24, maxDimension: me?.maxCameras > 3 ? 854 : 1280 }),
+      send: data => api('signal', data, session), onStream: attachRemoteStream, onState: connectionState });
     hostId = me.hostId; storageReady = me.storage; currentTake = me.take; armed = false;
     roomVideos.clear(); for (const job of me.recordings || []) roomVideos.set(job.id, job);
     let best = Infinity;
@@ -93,15 +99,15 @@ async function handleEvent(type, data) {
     for (const job of data.recordings || []) roomVideos.set(job.id, job);
     for (const p of data.peers) peers.set(p.id, p);
     render(); renderSettings(); updateRecordingUI(); await publishCamera();
-    for (const p of data.peers) if (stream) await offer(p.id);
+    await mesh.connectAll(); updateNetworkNote();
   }
-  if (type === 'joined') { peers.set(data.id, data); render(); if (stream) await offer(data.id); }
+  if (type === 'joined') { peers.set(data.id, data); render(); await mesh.connectAll(); updateNetworkNote(); }
   if (type === 'left') {
-    peers.delete(data.id); outgoing.get(data.id)?.close(); outgoing.delete(data.id); incoming.get(data.id)?.close(); incoming.delete(data.id);
-    pending.delete(data.id); document.getElementById(`cam-${data.id}`)?.remove(); render();
+    peers.delete(data.id); mesh.remove(data.id);
+    document.getElementById(`cam-${data.id}`)?.remove(); render(); updateNetworkNote();
   }
   if (type === 'live') { liveId = data.id; updateLive(); }
-  if (type === 'signal') await receiveSignal(data);
+  if (type === 'signal') await mesh.receive(data);
   if (type === 'host') { hostId = data.id; renderSettings(); updateRecordingUI(); }
   if (type === 'camera-state') {
     if (data.id === me.id) me.camera = data.camera; else if (peers.has(data.id)) peers.set(data.id, data);
@@ -116,61 +122,34 @@ async function handleEvent(type, data) {
   if (type === 'neon-recordings') { for (const job of data) roomVideos.set(job.id, job); renderRoomVideos(); }
   if (type === 'cloud-status') $('cloud-status').textContent = data.status === 'live' ? 'Neon Realtime: đang đồng bộ video' : `Neon Realtime: ${data.status}. Trạng thái trực tiếp vẫn qua máy chủ phòng.`;
 }
-function makePC(other, sender, receiving) {
-  const pc = new RTCPeerConnection({ iceServers: me.iceServers });
-  const session = me;
-  pc.onicecandidate = e => { if (e.candidate && me?.id === session.id) api('signal', { to: other, sender, candidate: e.candidate }, session).catch(() => {}); };
-  if (receiving) {
-    pc.ontrack = e => {
-      const video = document.getElementById(`video-${other}`); if (!video) return;
-      video.srcObject = e.streams[0] || new MediaStream([e.track]);
-      video.play().catch(() => {});
-      video.onplaying = () => status(other, 'Đang nhận hình', true);
-      e.track.onmute = () => status(other, 'Camera đang tạm dừng hoặc mạng yếu');
-      e.track.onunmute = () => status(other, 'Đang nhận hình', true);
-    };
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed') status(other, 'Không nhận được hình. Thử vào lại phòng; mạng khác nhau có thể cần TURN.');
-      else if (pc.connectionState === 'disconnected') status(other, 'Đường truyền gián đoạn…');
-      else if (pc.connectionState === 'connected') status(other, 'Đang nhận hình', true);
-    };
-  }
-  return pc;
+function updateNetworkNote() {
+  if (!me) return;
+  const cameras = [...peers.values()].filter(p => p.role === 'camera');
+  const received = cameras.filter(p => { const video = document.getElementById(`video-${p.id}`); return video?.srcObject && video.readyState >= 2 && !video.paused; }).length;
+  $('network-status').textContent = `Đang xem ${received}/${cameras.length} camera khác. ${me.turnConfigured ? 'Đã cấu hình chuyển tiếp mạng (TURN).' : 'Chưa có TURN: các máy khác Wi-Fi hoặc 4G/5G có thể không thấy nhau. Cần cấu hình TURN trên server.'}`;
 }
-async function offer(other) {
-  if (!me || outgoing.has(other)) return;
-  const pc = makePC(other, me.id, false); outgoing.set(other, pc);
-  for (const track of stream.getVideoTracks()) {
-    const sender = pc.addTrack(track, stream), params = sender.getParameters();
-    if (!params.encodings?.length) params.encodings = [{}];
-    params.encodings[0].maxBitrate = cameraOptions.previewBitrate;
-    try { await sender.setParameters(params); } catch { /* Browser can use its own congestion control. */ }
+function connectionState(other, direction, state) {
+  const card = document.getElementById(`cam-${other}`); if (!card) return;
+  if (direction === 'send') {
+    card.querySelector('.send-status').textContent = state === 'failed' ? 'Không gửi được camera của bạn tới máy này; kiểm tra TURN/mạng.' : state === 'retrying' ? 'Đang thử gửi lại camera của bạn tới máy này…' : '';
+    return;
   }
-  await pc.setLocalDescription(await pc.createOffer());
-  await api('signal', { to: other, sender: me.id, description: pc.localDescription });
+  const video = card.querySelector('video');
+  if (state === 'failed') status(other, me.turnConfigured ? 'Kết nối camera thất bại. Kiểm tra TURN/đường mạng hoặc bấm Kết nối lại.' : 'Không nối được trực tiếp. Các máy khác mạng cần TURN trên server.');
+  else if (state === 'retrying' || state === 'disconnected') status(other, 'Mạng gián đoạn · đang tự kết nối lại…');
+  else if (state === 'connected') status(other, video.readyState >= 2 && !video.paused ? 'Đang nhận hình' : 'Đã kết nối · chờ hình ảnh', video.readyState >= 2 && !video.paused);
+  updateNetworkNote();
 }
-async function receiveSignal({ from, sender, description, candidate }) {
-  if (!peers.has(from)) return;
-  const receiving = sender === from;
-  const map = receiving ? incoming : outgoing;
-  let pc = map.get(from);
-  if (description?.type === 'offer' && receiving) {
-    if (peers.get(from).role !== 'camera') return;
-    pc?.close(); pc = makePC(from, from, true); incoming.set(from, pc);
-    await pc.setRemoteDescription(description);
-    for (const c of pending.get(from) || []) await pc.addIceCandidate(c);
-    pending.delete(from);
-    await pc.setLocalDescription(await pc.createAnswer());
-    await api('signal', { to: from, sender: from, description: pc.localDescription });
-  } else if (description?.type === 'answer' && !receiving && pc) {
-    await pc.setRemoteDescription(description);
-    const key = `out-${from}`;
-    for (const c of pending.get(key) || []) await pc.addIceCandidate(c);
-    pending.delete(key);
-  } else if (candidate) {
-    if (pc?.remoteDescription) await pc.addIceCandidate(candidate);
-    else { const key = receiving ? from : `out-${from}`; const list = pending.get(key) || []; if (list.length < 100) list.push(candidate); pending.set(key, list); }
-  }
+function attachRemoteStream(other, remoteStream, track) {
+  const card = document.getElementById(`cam-${other}`), video = card?.querySelector('video'); if (!video) return;
+  const playButton = card.querySelector('.play-camera');
+  const play = () => video.play().then(() => { playButton.hidden = true; updateNetworkNote(); }).catch(() => { playButton.hidden = false; status(other, 'Trình duyệt chặn tự phát. Bấm Hiện hình.'); });
+  video.onplaying = () => { playButton.hidden = true; status(other, 'Đang nhận hình', true); updateNetworkNote(); };
+  video.srcObject = remoteStream; video.muted = true; video.playsInline = true;
+  playButton.onclick = play;
+  track.onmute = () => { if (video.srcObject === remoteStream) status(other, 'Camera tạm dừng hoặc mạng yếu'); };
+  track.onunmute = () => { if (video.srcObject === remoteStream) play(); };
+  play();
 }
 function status(id, text, playing = false) {
   const card = document.getElementById(`cam-${id}`); if (!card) return;
@@ -186,11 +165,13 @@ function render() {
   for (const p of cameras) {
     if (document.getElementById(`cam-${p.id}`)) continue;
     const card = document.createElement('article'); card.className = 'camera'; card.id = `cam-${p.id}`;
-    card.innerHTML = '<div class="video-wrap"><video autoplay playsinline muted></video><span class="overlay">Đang kết nối camera…</span><span class="badge"></span></div><div class="cam-info"><h3></h3><p class="cam-status">Đang kết nối</p><div class="cam-rec"></div><div class="cam-buttons"><button class="tally">Lên hình</button><button class="secondary expand">⛶ Phóng to</button></div></div>';
+    card.innerHTML = '<div class="video-wrap"><video autoplay playsinline muted></video><span class="overlay">Đang kết nối camera…</span><span class="badge"></span></div><div class="cam-info"><h3></h3><p class="cam-status">Đang kết nối</p><p class="send-status"></p><div class="cam-rec"></div><div class="cam-buttons"><button class="tally">Lên hình</button><button class="secondary expand">⛶ Phóng to</button><button class="secondary reconnect">↻ Kết nối lại</button><button class="secondary play-camera" hidden>▶ Hiện hình</button></div></div>';
     const video = card.querySelector('video'); video.id = `video-${p.id}`;
     card.querySelector('h3').textContent = `${p.name}${p.id === me.id ? ' (bạn)' : ''}`;
     card.querySelector('.badge').textContent = `CAM ${String(p.slot).padStart(2, '0')}`;
     card.querySelector('.tally').onclick = () => api('live', { id: p.id }).catch(e => message(e.message));
+    card.querySelector('.reconnect').hidden = p.id === me.id;
+    card.querySelector('.reconnect').onclick = () => mesh.reconnect(p.id);
     card.querySelector('.expand').onclick = async () => {
       try { if (document.fullscreenElement) await document.exitFullscreen(); else if (card.requestFullscreen) await card.requestFullscreen(); else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen(); else card.classList.toggle('focused'); } catch { card.classList.toggle('focused'); }
     };
@@ -220,8 +201,7 @@ function watchTrack(track) {
 async function leave() {
   await recording.stop(); armed = false;
   const old = me; me = null; controller?.abort(); controller = null;
-  for (const pc of [...outgoing.values(), ...incoming.values()]) pc.close();
-  outgoing.clear(); incoming.clear(); pending.clear(); peers.clear();
+  mesh?.close(); mesh = null; peers.clear();
   hostId = null; currentTake = null; clearInterval(takeTimer);
   stream?.getTracks().forEach(t => t.stop()); stream = null; paused = false; liveId = null;
   try { await wake?.release(); } catch {} wake = null;
@@ -255,7 +235,10 @@ $('flip').onclick = async () => {
     if (!next) return;
     if (me?.id !== session.id) { next.getTracks().forEach(t => t.stop()); return; }
     stream = next; const track = next.getVideoTracks()[0]; track.enabled = !paused; watchTrack(track);
-    await Promise.all([...outgoing.values()].map(pc => pc.getSenders().find(s => s.track?.kind === 'video')?.replaceTrack(track)));
+    await Promise.allSettled([...mesh.outgoing.entries()].map(async ([other, pc]) => {
+      try { await pc.getSenders().find(s => s.track?.kind === 'video')?.replaceTrack(track); await mesh.applyPreview(pc); }
+      catch { await mesh.ensureSender(other, { force: true }); }
+    }));
     document.getElementById(`video-${me.id}`).srcObject = next;
     status(me.id, paused ? 'Camera đang tạm dừng' : 'Camera của bạn', !paused);
     armed = false; await publishCamera(); renderSettings(me.id);
@@ -333,10 +316,7 @@ async function applyCameraConfig(config) {
     await track.applyConstraints({ width: { exact: width }, height: { exact: height }, frameRate: { ideal: fps, max: fps }, ...(Object.keys(advanced).length ? { advanced: [advanced] } : {}) });
     cameraOptions = { bitrate, previewBitrate, audio: Boolean(audio) };
     if (!cameraOptions.audio) for (const audioTrack of stream.getAudioTracks()) { stream.removeTrack(audioTrack); audioTrack.stop(); }
-    for (const pc of outgoing.values()) {
-      const sender = pc.getSenders().find(s => s.track?.kind === 'video'); if (!sender) continue;
-      const params = sender.getParameters(); if (!params.encodings?.length) params.encodings = [{}]; params.encodings[0].maxBitrate = previewBitrate; await sender.setParameters(params);
-    }
+    await Promise.allSettled([...mesh.outgoing.values()].map(pc => mesh.applyPreview(pc)));
     await publishCamera(); message('Đã áp dụng cấu hình. Bấm “Sẵn sàng quay” trên điện thoại này trước lượt quay tiếp theo.');
   } catch (error) {
     try { await track.applyConstraints(previous); } catch {}
@@ -411,3 +391,8 @@ $('camera-config-form').onsubmit = async e => {
 };
 $('record-all').onclick = async () => { $('record-all').disabled = true; try { await api('record/start', {}); } catch (e) { message(e.message); updateRecordingUI(); } };
 $('stop-all').onclick = async () => { $('stop-all').disabled = true; try { await api('record/stop', {}); } catch (e) { message(e.message); updateRecordingUI(); } };
+const recoverConnections = () => { if (mesh) for (const peer of peers.values()) mesh.reconnect(peer.id); };
+window.addEventListener('online', recoverConnections);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && mesh) {
+  for (const [other, pc] of mesh.incoming) if (pc.connectionState === 'failed' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') mesh.reconnect(other);
+} });
