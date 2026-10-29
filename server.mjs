@@ -3,8 +3,10 @@ import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { RecordingStore, storageConfigured, downloadURL } from './recordings.mjs';
-import { databaseEnabled, persistRecording, listRecordings, subscribeRecordings, closeDatabase, getPool } from './database.mjs';
+import { databaseEnabled, persistRecording, listRecordings, listAdminRecordings, findRecording, subscribeRecordings, closeDatabase, getPool } from './database.mjs';
 import { iceConfiguration } from './ice.mjs';
+import { createAdmin } from './admin.mjs';
+const admin = createAdmin();
 
 const rooms = new Map(), sessions = new Map(), limits = new Map();
 const publicDir = new URL('./public/', import.meta.url);
@@ -44,10 +46,35 @@ export const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
     if (req.method === 'POST' && req.headers.origin && req.headers.origin !== `http://${req.headers.host}` && req.headers.origin !== `https://${req.headers.host}`) return send(res, 403, { error: 'Origin không hợp lệ.' });
-    if (req.method === 'GET' && ['/', '/app.js', '/style.css', '/recorder.js', '/mesh.js'].includes(url.pathname)) {
-      const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
+    if (req.method === 'GET' && ['/', '/admin', '/admin.js', '/app.js', '/style.css', '/recorder.js', '/recording-storage.js', '/mesh.js'].includes(url.pathname)) {
+      const name = url.pathname === '/' ? 'index.html' : url.pathname === '/admin' ? 'admin.html' : url.pathname.slice(1);
       const data = await readFile(new URL(name, publicDir));
       res.writeHead(200, { 'Content-Type': name.endsWith('.html') ? 'text/html; charset=utf-8' : name.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8' }); return res.end(data);
+    }
+    if (url.pathname.startsWith('/api/admin/')) {
+      if (req.method === 'POST' && url.pathname === '/api/admin/login') {
+        const result = await admin.login(req, res, await body(req)); const { status, ...data } = result; return send(res, status, data);
+      }
+      const session = admin.authenticated(req);
+      if (!session) return send(res, 401, { error: 'Vui lòng đăng nhập admin.' });
+      if (req.method === 'POST' && !admin.authorizedMutation(req, session)) return send(res, 403, { error: 'Phiên xác thực không hợp lệ. Tải lại trang.' });
+      if (req.method === 'GET' && url.pathname === '/api/admin/session') return send(res, 200, { username: process.env.ADMIN_USERNAME, csrf: session.csrf });
+      if (req.method === 'POST' && url.pathname === '/api/admin/logout') { admin.logout(req, res, session); return send(res, 200, {}); }
+      if (req.method === 'GET' && url.pathname === '/api/admin/recordings') {
+        const room = (url.searchParams.get('room') || '').trim().toUpperCase(), state = url.searchParams.get('state') || '', before = url.searchParams.get('before') || '';
+        if ((room && !/^[A-F0-9]{12}$/.test(room)) || (before && !/^[a-f0-9]{32}$/.test(before)) || !['', 'scheduled', 'receiving', 'uploading', 'uploaded', 'upload-failed', 'capture-failed'].includes(state)) return send(res, 400, { error: 'Bộ lọc không hợp lệ.' });
+        if (!databaseEnabled()) return send(res, 503, { error: 'Cần kết nối Postgres để quản lý video qua các lần khởi động lại.' });
+        const recordings = await listAdminRecordings({ room, state, before, limit: 51 });
+        return send(res, 200, { recordings: recordings.slice(0, 50), next: recordings.length > 50 ? recordings[49].id : null });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/admin/download') {
+        const { id } = await body(req);
+        if (typeof id !== 'string' || !/^[a-f0-9]{32}$/.test(id)) return send(res, 400, { error: 'Mã video không hợp lệ.' });
+        const job = await findRecording(id);
+        if (!job || job.state !== 'uploaded' || !job.key) return send(res, 404, { error: 'Video chưa lưu hoàn tất trên Neon.' });
+        return send(res, 200, { url: await downloadURL(job) });
+      }
+      return send(res, 404, { error: 'Không tìm thấy.' });
     }
     if (req.method === 'POST' && url.pathname === '/api/join') {
       const ice = iceConfiguration();
@@ -165,7 +192,10 @@ export const server = http.createServer(async (req, res) => {
       const input = await body(req), job = await records.load(input.id);
       if (job.peerId !== p.id || job.room !== p.room.code) return send(res, 403, { error: 'Không có quyền cập nhật video.' });
       if (!['recording', 'failed', 'stopped'].includes(input.state)) return send(res, 400, { error: 'Trạng thái không hợp lệ.' });
-      await records.update(job.id, { captureState: input.state, captureError: String(input.error || '').slice(0, 200), actualStartedAt: input.actualStartedAt });
+      const patch = { captureState: input.state, captureError: String(input.error || '').slice(0, 200) };
+      if (Number.isFinite(input.actualStartedAt)) patch.actualStartedAt = input.actualStartedAt;
+      if (input.capture) patch.capture = records.captureDetails(input.capture);
+      await records.update(job.id, patch);
       return send(res, 200, {});
     }
     if (req.method === 'POST' && url.pathname === '/api/live') {

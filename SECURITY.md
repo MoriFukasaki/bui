@@ -15,3 +15,5 @@ This version has no user accounts and allows anonymous room creation with an in-
 Use HTTPS, preserve authorization/Host headers correctly, disable SSE proxy buffering, and keep the runtime spool outside the public web root on persistent storage. Run one Node instance. A restart closes active rooms. Configure TURN where required; phone browser/OS interruptions and hardware-specific camera settings still need physical-device testing.
 
 If reporting a vulnerability, use the repository's private security reporting feature when enabled. Do not include secrets, live room codes or private videos in a public issue.
+
+Admin: trang /admin chỉ hoạt động khi ADMIN_USERNAME và ADMIN_PASSWORD_HASH (scrypt) được cấu hình phía server. Không có tài khoản mặc định. Cookie HttpOnly/SameSite=Strict/Secure trong production, thời hạn 8 giờ, CSRF token cho POST; mật khẩu và phiên không được đưa vào localStorage. Giới hạn đăng nhập trong RAM, dùng một instance. Admin có quyền xem/tải mọi phòng; bảo vệ credential trong Render Environment.

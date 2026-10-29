@@ -26,6 +26,17 @@ export async function listRecordings(roomCode) {
   if (!databaseEnabled()) return [];
   return (await getPool().query('SELECT metadata FROM camroom_recordings WHERE room_code=$1 ORDER BY created_at DESC LIMIT 1000', [roomCode])).rows.map(r => r.metadata);
 }
+export async function listAdminRecordings({ room = '', state = '', before = '', limit = 50 } = {}) {
+  if (!databaseEnabled()) return [];
+  return (await getPool().query(`SELECT metadata FROM camroom_recordings
+    WHERE ($1 = '' OR room_code = $1) AND ($2 = '' OR state = $2 OR ($2 = 'capture-failed' AND metadata->>'captureState' = 'failed'))
+      AND ($3 = '' OR (created_at, id) < (SELECT created_at, id FROM camroom_recordings WHERE id=$3))
+    ORDER BY created_at DESC, id DESC LIMIT $4`, [room, state, before, limit])).rows.map(row => row.metadata);
+}
+export async function findRecording(id) {
+  if (!databaseEnabled()) return null;
+  return (await getPool().query('SELECT metadata FROM camroom_recordings WHERE id=$1', [id])).rows[0]?.metadata || null;
+}
 export function liveServer() {
   if (!process.env.NEON_REALTIME_URL || !process.env.NEON_REALTIME_SECRET) throw Error('Realtime chưa được cấu hình.');
   if (!realtime) realtime = createRealtime({ url: process.env.NEON_REALTIME_URL, secret: process.env.NEON_REALTIME_SECRET, db: decodeURIComponent(new URL(process.env.DATABASE_URL).pathname.slice(1)) });

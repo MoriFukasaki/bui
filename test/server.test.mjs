@@ -44,6 +44,25 @@ test('invalid settings and unauthorized requests are rejected', async () => {
   for (const maxCameras of [0, 11, 2.5, 'bad']) assert.equal((await post('join', { create: true, maxCameras })).status, 400);
   assert.equal((await post('live', { id: null })).status, 401);
 });
+test('admin endpoints require a separate login and CSRF token; logout revokes access', async () => {
+  const { hashPassword } = await import('../admin.mjs');
+  process.env.ADMIN_USERNAME = 'offline-admin'; process.env.ADMIN_PASSWORD_HASH = await hashPassword('offline-test-password');
+  try {
+    const peer = await join({ create: true });
+    assert.equal((await fetch(`${base}/api/admin/recordings`, { headers: { Authorization: `Bearer ${peer.token}` } })).status, 401);
+    assert.equal((await post('admin/login', { username: 'offline-admin', password: 'wrong' })).status, 401);
+    const login = await fetch(`${base}/api/admin/login`, { method: 'POST', body: JSON.stringify({ username: 'offline-admin', password: 'offline-test-password' }) });
+    assert.equal(login.status, 200); const { csrf } = await login.json();
+    const Cookie = login.headers.get('set-cookie').split(';')[0];
+    assert.equal((await fetch(`${base}/api/admin/session`, { headers: { Cookie } })).status, 200);
+    assert.equal((await fetch(`${base}/api/admin/download`, { method: 'POST', headers: { Cookie }, body: '{}' })).status, 403);
+    assert.equal((await fetch(`${base}/api/admin/download`, { method: 'POST', headers: { Cookie, 'X-CSRF-Token': csrf }, body: JSON.stringify({ id: '../secret' }) })).status, 400);
+    assert.equal((await fetch(`${base}/api/admin/recordings?room=bad`, { headers: { Cookie } })).status, 400);
+    assert.equal((await fetch(`${base}/api/admin/logout`, { method: 'POST', headers: { Cookie, 'X-CSRF-Token': csrf } })).status, 200);
+    assert.equal((await fetch(`${base}/api/admin/session`, { headers: { Cookie } })).status, 401);
+    await leave(peer);
+  } finally { delete process.env.ADMIN_USERNAME; delete process.env.ADMIN_PASSWORD_HASH; }
+});
 test('private files stay outside the static allowlist and foreign origins cannot create rooms', async () => {
   for (const path of ['/.env.local', '/.neon', '/.git/config', '/database.mjs', '/data/recordings/manifest.json', '/verification/neon-services.txt', '/%2e%2e/.env.local']) {
     const response = await fetch(`${base}${path}`);

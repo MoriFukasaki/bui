@@ -63,6 +63,7 @@ export class CameraMesh {
     const options = this.getPreview(), track = this.getStream()?.getVideoTracks()[0];
     const sender = pc.getSenders().find(sender => sender.track?.kind === 'video'); if (!sender) return;
     const params = sender.getParameters(); if (!params.encodings?.length) return;
+    params.degradationPreference = 'maintain-resolution';
     const settings = track?.getSettings?.() || {};
     const scale = Math.max(1, Math.max(settings.width || 0, settings.height || 0) / (options.maxDimension || 854));
     for (const encoding of params.encodings) { encoding.maxBitrate = options.bitrate; encoding.maxFramerate = options.fps || 15; encoding.scaleResolutionDownBy = scale; }

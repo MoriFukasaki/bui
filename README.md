@@ -123,3 +123,7 @@ Coturn cần `use-auth-secret`, shared secret khớp, external IP/realm và fire
 - `node scripts/prove-videos.mjs <mã-phòng-QA>`: tải 3 video từ cùng lượt, so SHA-256 với spool, kiểm tra sidecar/timing.
 
 Kết quả ở `verification/`. Đã thử 3 camera giả lập, chưa thử camera vật lý, micro hay 10 điện thoại thật. Camera canvas ở tab nền có thể bị giảm fps nên thời lượng media các file QA khác nhau; đây không phải kiểm thử đồng bộ khung hình trên thiết bị thực.
+
+## Quản trị video và kiểm tra chất lượng
+
+Xem [ADMIN.md](ADMIN.md) để tạo tài khoản admin trên Render, quản lý video mọi phòng và kiểm tra chất lượng/bộ nhớ điện thoại.

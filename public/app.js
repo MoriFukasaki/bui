@@ -6,7 +6,7 @@ const peers = new Map();
 let mesh = null;
 let liveId = null, signalQueue = Promise.resolve();
 let armed = false, clockOffset = 0, hostId = null, currentTake = null, storageReady = false, takeTimer;
-let cameraOptions = { bitrate: 5000000, previewBitrate: 400000, audio: false };
+let cameraOptions = { bitrate: 10000000, previewBitrate: 400000, audio: false };
 const roomVideos = new Map();
 const message = text => { $('message').textContent = text; $('message').hidden = !text; };
 const recording = createRecordingController({ api, getStream: () => stream, getOptions: () => cameraOptions, notify: message, onState: active => {
@@ -23,7 +23,7 @@ async function api(path, data, session = me) {
   const result = await res.json(); if (!res.ok) throw Error(result.error || 'Không kết nối được máy chủ.'); return result;
 }
 function captureConstraints(max = 3) {
-  return { audio: false, video: { facingMode: { ideal: facing }, width: { ideal: max > 3 ? 854 : 1280 }, height: { ideal: max > 3 ? 480 : 720 }, frameRate: { ideal: max > 3 ? 15 : 24, max: max > 3 ? 15 : 24 } } };
+  return { audio: false, video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } } };
 }
 async function keepAwake() {
   if (me && 'wakeLock' in navigator && document.visibilityState === 'visible') {
@@ -276,11 +276,11 @@ function renderSettings(selected = $('config-target').value) {
   const p = cameras.find(p => p.id === target.value), settings = p?.camera?.settings || {}, caps = p?.camera?.capabilities || {};
   $('camera-config-form').hidden = !p;
   $('actual-settings').textContent = p?.camera ? `Thực tế: ${settings.width}×${settings.height} · ${Number(settings.frameRate || 0).toFixed(1)} fps · ${p.camera.mime || 'không hỗ trợ ghi'}${p.camera.error ? ` · ${p.camera.error}` : ''}` : 'Camera chưa báo khả năng cấu hình.';
-  const resolution = `${settings.width}x${settings.height}`;
+  const resolution = `${Math.max(settings.width || 0, settings.height || 0)}x${Math.min(settings.width || 0, settings.height || 0)}`;
   if ([...$('resolution').options].some(o => o.value === resolution)) $('resolution').value = resolution;
   $('fps').value = Math.round(settings.frameRate || 30);
   if (caps.frameRate) { $('fps').min = Math.max(1, Math.ceil(caps.frameRate.min)); $('fps').max = Math.floor(caps.frameRate.max); }
-  $('record-bitrate').value = String(settings.recordBitrate || 5000000); $('preview-bitrate').value = String(settings.previewBitrate || 400000); $('record-audio').checked = Boolean(settings.audio);
+  $('record-bitrate').value = String(settings.recordBitrate || 10000000); $('preview-bitrate').value = String(settings.previewBitrate || 400000); $('record-audio').checked = Boolean(settings.audio);
   const root = $('device-controls'); root.replaceChildren();
   for (const [key, title] of Object.entries(advancedControls)) {
     const cap = caps[key]; if (cap === undefined) continue;
@@ -313,7 +313,8 @@ async function applyCameraConfig(config) {
       if (cap && typeof cap === 'object' && !Array.isArray(cap) && (!Number.isFinite(value) || value < cap.min || value > cap.max)) throw Error(`${key} nằm ngoài khả năng thiết bị.`);
       advanced[key] = value;
     }
-    await track.applyConstraints({ width: { exact: width }, height: { exact: height }, frameRate: { ideal: fps, max: fps }, ...(Object.keys(advanced).length ? { advanced: [advanced] } : {}) });
+    const portrait = (track.getSettings().height || 0) > (track.getSettings().width || 0);
+    await track.applyConstraints({ width: { exact: portrait ? height : width }, height: { exact: portrait ? width : height }, frameRate: { ideal: fps, max: fps }, ...(Object.keys(advanced).length ? { advanced: [advanced] } : {}) });
     cameraOptions = { bitrate, previewBitrate, audio: Boolean(audio) };
     if (!cameraOptions.audio) for (const audioTrack of stream.getAudioTracks()) { stream.removeTrack(audioTrack); audioTrack.stop(); }
     await Promise.allSettled([...mesh.outgoing.values()].map(pc => mesh.applyPreview(pc)));
@@ -359,7 +360,7 @@ function renderRoomVideos() {
   for (const job of [...roomVideos.values()].reverse()) {
     const row = document.createElement('div'); row.className = 'room-recording';
     const text = document.createElement('span');
-    text.textContent = `${job.name} · CAM ${job.slot} · ${job.take} · ${job.captureState === 'failed' ? `Lỗi ghi: ${job.captureError}` : stateLabels[job.state] || job.state} · ${(job.bytes / 1048576).toFixed(1)} MB`;
+    text.textContent = `${job.name} · CAM ${job.slot} · ${job.take} · ${job.captureState === 'failed' ? `Lỗi ghi: ${job.captureError}` : stateLabels[job.state] || job.state} · ${(job.bytes / 1048576).toFixed(1)} MB${job.capture?.width ? ` · ${job.capture.width}×${job.capture.height} · ${(job.capture.encoderBitrate / 1000000).toFixed(1)} Mbps` : ''}`;
     row.append(text);
     if (job.state === 'uploaded') {
       const button = document.createElement('button'); button.className = 'secondary'; button.textContent = 'Tải video Neon';

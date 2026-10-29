@@ -23,6 +23,11 @@ export class RecordingStore {
     await this.save(job); await this.onChange(this.public(job)); return { ...this.public(job), token };
   }
   public(job) { const { tokenHash, chunks, ...safe } = job; return safe; }
+  captureDetails(value) {
+    const result = {};
+    for (const key of ['width', 'height', 'frameRate', 'requestedBitrate', 'encoderBitrate']) if (Number.isFinite(value?.[key]) && value[key] > 0 && value[key] <= 100000000) result[key] = value[key];
+    return result;
+  }
   async authenticated(id, token) { const job = await this.load(id); if (!token || !timingSafeEqual(Buffer.from(digest(token), 'hex'), Buffer.from(job.tokenHash, 'hex'))) throw Error('Không có quyền upload video này.'); return job; }
   async locked(id, fn) {
     const previous = this.locks.get(id) || Promise.resolve();
@@ -55,6 +60,7 @@ export class RecordingStore {
       if ((details.actualStartedAt !== undefined || details.actualStoppedAt !== undefined) &&
           (!Number.isFinite(details.actualStartedAt) || !Number.isFinite(details.actualStoppedAt) || details.actualStartedAt < 0 || details.actualStoppedAt < details.actualStartedAt)) throw Error('Thời gian video không hợp lệ.');
       job.mime = details.mime; job.finalCount = details.count; job.actualStartedAt = details.actualStartedAt; job.actualStoppedAt = details.actualStoppedAt;
+      if (details.capture) job.capture = this.captureDetails(details.capture);
       job.deviceClockOffsetMs = Number.isFinite(details.clockOffset) ? details.clockOffset : 0;
       job.actualStartedServerAt = Number(job.actualStartedAt) + job.deviceClockOffsetMs;
       job.actualStoppedServerAt = Number(job.actualStoppedAt) + job.deviceClockOffsetMs;
