@@ -22,20 +22,22 @@ export async function persistRecording(job) {
       bytes=EXCLUDED.bytes, metadata=EXCLUDED.metadata, updated_at=now()`,
   [job.id, job.room, job.take, job.name, job.slot, job.state, job.key, job.bytes, JSON.stringify(job)]);
 }
-export async function listRecordings(roomCode) {
+export async function listRecordings(roomCode, includeDeleted = false) {
   if (!databaseEnabled()) return [];
-  return (await getPool().query('SELECT metadata FROM camroom_recordings WHERE room_code=$1 ORDER BY created_at DESC LIMIT 1000', [roomCode])).rows.map(r => r.metadata);
+  return (await getPool().query("SELECT metadata FROM camroom_recordings WHERE room_code=$1 AND ($2 OR state <> 'deleted') ORDER BY created_at DESC", [roomCode, includeDeleted])).rows.map(r => r.metadata);
 }
-export async function listAdminRecordings({ room = '', state = '', before = '', limit = 50 } = {}) {
-  if (!databaseEnabled()) return [];
-  return (await getPool().query(`SELECT metadata FROM camroom_recordings
-    WHERE ($1 = '' OR room_code = $1) AND ($2 = '' OR state = $2 OR ($2 = 'capture-failed' AND metadata->>'captureState' = 'failed'))
-      AND ($3 = '' OR (created_at, id) < (SELECT created_at, id FROM camroom_recordings WHERE id=$3))
-    ORDER BY created_at DESC, id DESC LIMIT $4`, [room, state, before, limit])).rows.map(row => row.metadata);
+export async function saveRoom(room) {
+  if (!databaseEnabled()) return;
+  const result = await getPool().query('INSERT INTO camroom_rooms(code,max_cameras,owner_token_hash,latest_take) VALUES($1,$2,$3,$4) ON CONFLICT(code) DO UPDATE SET latest_take=EXCLUDED.latest_take WHERE camroom_rooms.owner_token_hash=EXCLUDED.owner_token_hash', [room.code, room.maxCameras, room.ownerHash, room.latestTake || null]);
+  if (!result.rowCount) throw Error('Không có quyền cập nhật phòng.');
 }
-export async function findRecording(id) {
+export async function loadRoom(code) {
   if (!databaseEnabled()) return null;
-  return (await getPool().query('SELECT metadata FROM camroom_recordings WHERE id=$1', [id])).rows[0]?.metadata || null;
+  const row = (await getPool().query('SELECT code,max_cameras,owner_token_hash,latest_take FROM camroom_rooms WHERE code=$1', [code])).rows[0];
+  return row ? { code: row.code, maxCameras: row.max_cameras, ownerHash: row.owner_token_hash, latestTake: row.latest_take } : null;
+}
+export async function deleteRecordingRow(id, room) {
+  if (databaseEnabled()) await getPool().query('DELETE FROM camroom_recordings WHERE id=$1 AND room_code=$2', [id, room]);
 }
 export function liveServer() {
   if (!process.env.NEON_REALTIME_URL || !process.env.NEON_REALTIME_SECRET) throw Error('Realtime chưa được cấu hình.');

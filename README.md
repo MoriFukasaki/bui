@@ -68,10 +68,10 @@ Muốn tạo bucket trong project mới: link đúng project/nhánh, khai báo `
 3. Mở **Cấu hình camera & chất lượng ghi**. Chủ phòng chọn từng máy để chỉnh từ xa; mỗi camera cũng tự chỉnh được. Có độ phân giải, fps, bitrate file ghi, bitrate xem trước và bật/tắt thu micro.
 4. Zoom, lấy nét, phơi sáng, ISO, cân bằng trắng, nhiệt độ màu, độ sáng, tương phản, bão hòa, độ nét và đèn chỉ xuất hiện nếu thiết bị báo hỗ trợ qua `getCapabilities()`. Web không điều khiển được mọi chức năng của app camera gốc. Giao diện hiển thị độ phân giải/fps thực tế sau áp dụng; tổ hợp không hỗ trợ sẽ báo lỗi. Camera trước/sau đổi tại điện thoại đó.
 5. Trên **mỗi điện thoại**, bấm **Sẵn sàng quay trên máy này**. Khi bật thu micro, thao tác này xin quyền micro tại máy đó. Âm thanh chỉ vào file, không phát trong ô xem trước để tránh hú. Sau đổi cấu hình, bấm sẵn sàng lại.
-6. Khi tất cả camera sẵn sàng, chủ phòng bấm **Bắt đầu quay tất cả**. Đếm ngược chung khoảng 3 giây. Máy vào sau khi lượt đã bắt đầu sẽ tham gia từ lượt kế tiếp.
+6. Khi tất cả camera sẵn sàng, chủ phòng bấm **Quay lượt mới (xóa lượt cũ)**. Đếm ngược chung khoảng 3 giây. Máy vào sau khi lượt đã bắt đầu sẽ tham gia từ lượt kế tiếp.
 7. Bấm **Dừng tất cả**, chờ từng video báo **Đã lưu Neon**. Có nút tải video Neon và tải bản trên thiết bị. Có thể bắt đầu lượt mới khi các máy sẵn sàng trở lại; upload lượt trước chạy riêng.
 
-Chỉ chủ phòng được quay/dừng chung và chỉnh camera khác. Khi chủ phòng rời, quyền chuyển sang thiết bị còn lại đầu tiên. Người có mã/link có thể vào và xem hình; chỉ chia sẻ trong nhóm. Lên hình là tín hiệu phối hợp, không quyết định máy được ghi: mọi camera sẵn sàng đều quay riêng.
+Chỉ chủ phòng được quay/dừng chung và chỉnh camera khác. Chủ phòng là admin và không tự chuyển quyền khi rời phòng. Chỉ admin được tải/xóa; phòng chỉ giữ lượt quay mới nhất, xóa lượt cũ ngay khi bắt đầu lượt mới. Người có mã/link có thể vào và xem hình; chỉ chia sẻ trong nhóm. Lên hình là tín hiệu phối hợp, không quyết định máy được ghi: mọi camera sẵn sàng đều quay riêng.
 
 ## Lưu và khôi phục video
 
@@ -87,7 +87,7 @@ Spool và IndexedDB chưa tự dọn để giữ khả năng khôi phục. Theo 
 
 ## Tự host HTTPS bằng Docker
 
-Neon đã triển khai backend dữ liệu; web Node.js vẫn cần VPS/hosting chạy lâu dài. Không đưa riêng public lên static hosting. Chạy một instance: room/presence trong RAM, restart kết thúc phòng đang mở.
+Neon đã triển khai backend dữ liệu; web Node.js vẫn cần VPS/hosting chạy lâu dài. Không đưa riêng public lên static hosting. Chạy một instance: room/presence trong RAM, restart ngắt kết nối đang mở; admin dùng lại đúng trình duyệt và mã phòng để khôi phục quyền từ Neon.
 
 1. Trỏ DNS domain về VPS; cài Docker + Compose; mở TCP 80/443.
 2. Copy source và `.env.local` chứa biến Neon lên server bằng kênh riêng tư, không đưa secrets vào image/public.
@@ -126,4 +126,4 @@ Kết quả ở `verification/`. Đã thử 3 camera giả lập, chưa thử ca
 
 ## Quản trị video và kiểm tra chất lượng
 
-Xem [ADMIN.md](ADMIN.md) để tạo tài khoản admin trên Render, quản lý video mọi phòng và kiểm tra chất lượng/bộ nhớ điện thoại.
+Xem [ADMIN.md](ADMIN.md) để hiểu quyền admin của chủ phòng, quy tắc xóa lượt cũ và các bước test trên Render.

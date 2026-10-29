@@ -17,3 +17,11 @@ test('unavailable phone storage falls back, preserves final metadata and release
   assert.equal(await (await store.chunk(job.id, 1)).blob.text(), 'last');
   assert.equal(warnings.length, 1); assert.equal((await store.list()).length, 1);
 });
+test('admin cleanup removes RAM copies and prevents delayed saves from recreating discarded jobs', async () => {
+  const store = createLocalStore({ indexedDB: null }); const job = { id: 'old', count: 0, bytes: 0 };
+  await store.put(job); await store.append(job, new Blob(['video'])); await store.remove(job.id);
+  await store.put(job); await store.patch(job.id, { final: true });
+  await assert.rejects(() => store.append(job, new Blob(['late'])), /admin xóa/);
+  assert.equal(await store.get(job.id), undefined); assert.deepEqual(await store.list(), []);
+  assert.equal(store.hasPendingVolatile(), false);
+});

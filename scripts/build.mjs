@@ -1,10 +1,13 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, copyFile, readFile, writeFile } from 'node:fs/promises';
-const modules = ['server.mjs', 'recordings.mjs', 'database.mjs', 'env.mjs', 'ice.mjs', 'admin.mjs', 'public/app.js', 'public/recorder.js', 'public/mesh.js', 'public/recording-storage.js', 'public/admin.js'];
+import { mkdir, copyFile, readFile, writeFile, cp, unlink } from 'node:fs/promises';
+const modules = ['server.mjs', 'recordings.mjs', 'database.mjs', 'env.mjs', 'ice.mjs', 'room-owner.mjs', 'scripts/migrate.mjs', 'public/app.js', 'public/recorder.js', 'public/mesh.js', 'public/recording-storage.js'];
+for (const file of ['dist/admin.mjs', 'dist/public/admin.html', 'dist/public/admin.js']) await unlink(file).catch(error => { if (error.code !== 'ENOENT') throw error; });
 for (const file of modules) execFileSync(process.execPath, ['--check', file], { stdio: 'inherit' });
 await mkdir('dist/public', { recursive: true });
-for (const file of [...modules, 'public/index.html', 'public/admin.html', 'public/style.css']) await copyFile(file, `dist/${file}`);
+await mkdir('dist/scripts', { recursive: true });
+await cp('migrations', 'dist/migrations', { recursive: true });
+for (const file of [...modules, 'public/index.html', 'public/style.css']) await copyFile(file, `dist/${file}`);
 const pkg = JSON.parse(await readFile('package.json', 'utf8'));
-await writeFile('dist/package.json', JSON.stringify({ name: pkg.name, version: pkg.version, private: true, type: 'module', scripts: { start: 'node server.mjs' }, engines: pkg.engines, dependencies: pkg.dependencies }, null, 2));
+await writeFile('dist/package.json', JSON.stringify({ name: pkg.name, version: pkg.version, private: true, type: 'module', scripts: { prestart: 'node scripts/migrate.mjs', start: 'node server.mjs' }, engines: pkg.engines, dependencies: pkg.dependencies }, null, 2));
 await copyFile('package-lock.json', 'dist/package-lock.json');
 console.log(`BUILD PASS: ${modules.length} JavaScript modules checked; server + web packaged in dist/ (no secrets).`);

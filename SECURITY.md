@@ -8,7 +8,7 @@ The private bucket and Postgres/Realtime credentials belong on the Node server. 
 
 ## Access model and deployment limits
 
-Room codes are bearer invitations: anyone with a code can join and view that room. Only the current host controls recording and remote camera configuration; each camera arms locally. Upload credentials authorize one recording, remain valid for retry while its spool exists, and are not account-level credentials. Private-bucket download URLs expire after five minutes.
+Room codes are bearer invitations: anyone with a code can join and view that room. Only the current host controls recording and remote camera configuration; each camera arms locally. Upload credentials authorize one recording, remain valid for retry while its spool exists, and are not account-level credentials. Downloads stream through the app and require the room owner cookie on every request; no presigned bucket URL is handed to participants.
 
 This version has no user accounts and allows anonymous room creation with an in-memory rate limit. It does not provide global storage quotas, per-user billing limits, or distributed abuse protection. Before exposing it broadly to untrusted Internet traffic, restrict access/room creation at an authenticated reverse proxy or add app authentication and quotas. Publishing source code to GitHub does not publish the local secrets or deploy the app automatically.
 
@@ -16,4 +16,6 @@ Use HTTPS, preserve authorization/Host headers correctly, disable SSE proxy buff
 
 If reporting a vulnerability, use the repository's private security reporting feature when enabled. Do not include secrets, live room codes or private videos in a public issue.
 
-Admin: trang /admin chỉ hoạt động khi ADMIN_USERNAME và ADMIN_PASSWORD_HASH (scrypt) được cấu hình phía server. Không có tài khoản mặc định. Cookie HttpOnly/SameSite=Strict/Secure trong production, thời hạn 8 giờ, CSRF token cho POST; mật khẩu và phiên không được đưa vào localStorage. Giới hạn đăng nhập trong RAM, dùng một instance. Admin có quyền xem/tải mọi phòng; bảo vệ credential trong Render Environment.
+Room creator is the only admin for their room. Ownership is a 256-bit HttpOnly/SameSite=Strict cookie, Secure in production, hashed in Postgres, valid for 30 days. A room code grants participation, never ownership. Host disconnect does not promote another participant. POST mutations require authenticated room session and same-origin checks. Do not expose admin cookies, and serve over HTTPS.
+
+Starting a new take permanently purges previous takes in that room (private objects + sidecars, spool and DB rows) before scheduling capture. Deleted upload capabilities fail closed; deletion is serialized with in-flight uploads to prevent resurrection. Cloud deletion failure blocks the next take. Connected clients clear temporary copies; offline clients reconcile on rejoin. File copies already downloaded or extracted from a participant-owned device cannot be revoked. No application-wide admin account or library remains.

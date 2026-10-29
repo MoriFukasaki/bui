@@ -1,6 +1,6 @@
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import './env.mjs';
-import { mkdir, readFile, writeFile, rename, stat } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, stat, readdir, rm } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -8,8 +8,8 @@ import { Readable } from 'node:stream';
 const digest = value => createHash('sha256').update(value).digest('hex');
 export const storageConfigured = () => ['AWS_ENDPOINT_URL_S3', 'AWS_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'NEON_BUCKET'].every(key => process.env[key]);
 export class RecordingStore {
-  constructor({ directory = process.env.RECORDING_DIR || './data/recordings', upload, onChange = () => {} } = {}) {
-    this.directory = resolve(directory); this.onChange = onChange; this.upload = upload || uploadNeon; this.locks = new Map();
+  constructor({ directory = process.env.RECORDING_DIR || './data/recordings', upload, remove = deleteNeon, onChange = () => {}, onDelete = () => {} } = {}) {
+    this.directory = resolve(directory); this.onChange = onChange; this.onDelete = onDelete; this.upload = upload || uploadNeon; this.remove = remove; this.locks = new Map();
   }
   path(id) { if (!/^[a-f0-9]{32}$/.test(id)) throw Error('Mã video không hợp lệ.'); return join(this.directory, id); }
   async save(job) {
@@ -28,14 +28,40 @@ export class RecordingStore {
     for (const key of ['width', 'height', 'frameRate', 'requestedBitrate', 'encoderBitrate']) if (Number.isFinite(value?.[key]) && value[key] > 0 && value[key] <= 100000000) result[key] = value[key];
     return result;
   }
-  async authenticated(id, token) { const job = await this.load(id); if (!token || !timingSafeEqual(Buffer.from(digest(token), 'hex'), Buffer.from(job.tokenHash, 'hex'))) throw Error('Không có quyền upload video này.'); return job; }
+  async authenticated(id, token) {
+    let job;
+    try { job = await this.load(id); } catch (error) { if (error.code === 'ENOENT') throw Object.assign(Error('Video đã bị xóa hoặc lượt quay đã hết hiệu lực.'), { code: 'RECORDING_GONE' }); throw error; }
+    if (job.state === 'deleted') throw Object.assign(Error('Video đã bị xóa.'), { code: 'RECORDING_GONE' });
+    if (!token || !timingSafeEqual(Buffer.from(digest(token), 'hex'), Buffer.from(job.tokenHash, 'hex'))) throw Error('Không có quyền upload video này.'); return job;
+  }
   async locked(id, fn) {
     const previous = this.locks.get(id) || Promise.resolve();
     const work = previous.catch(() => {}).then(fn); this.locks.set(id, work);
     try { return await work; } finally { if (this.locks.get(id) === work) this.locks.delete(id); }
   }
   async update(id, patch) {
-    return this.locked(id, async () => { const job = await this.load(id); Object.assign(job, patch); await this.save(job); await this.onChange(this.public(job)); return this.public(job); });
+    return this.locked(id, async () => { const job = await this.load(id); if (job.state === 'deleted') throw Error('Video đã bị xóa.'); Object.assign(job, patch); await this.save(job); await this.onChange(this.public(job)); return this.public(job); });
+  }
+  async listRoom(room) {
+    const jobs = [];
+    for (const entry of await readdir(this.directory, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; })) {
+      if (!entry.isDirectory() || !/^[a-f0-9]{32}$/.test(entry.name)) continue;
+      const job = await this.load(entry.name); if (job.room === room) jobs.push(this.public(job));
+    }
+    return jobs;
+  }
+  async delete(recording) {
+    return this.locked(recording.id, async () => {
+      let job;
+      try { job = await this.load(recording.id); } catch (error) { if (error.code !== 'ENOENT') throw error; job = { ...recording }; }
+      if (job.room !== recording.room) throw Error('Video không thuộc phòng này.');
+      // Tombstone before cloud deletion; every late chunk/complete now fails closed.
+      job.state = 'deleted'; await this.save(job); await this.onChange(this.public(job));
+      await this.remove(job);
+      // path() only accepts a 32-hex child directory beneath the configured spool.
+      await rm(this.path(job.id), { recursive: true, force: true });
+      await this.onDelete(this.public(job));
+    });
   }
   async chunk(id, token, index, bytes) {
     return this.locked(id, async () => {
@@ -98,6 +124,22 @@ export async function downloadURL(job) {
   const [{ GetObjectCommand }, { getSignedUrl }] = await Promise.all([import('@aws-sdk/client-s3'), import('@aws-sdk/s3-request-presigner')]);
   const client = await storageClient();
   try { return await getSignedUrl(client, new GetObjectCommand({ Bucket: process.env.NEON_BUCKET, Key: job.key, ResponseContentDisposition: `attachment; filename="cam-${job.slot}-${job.take}.${job.mime.startsWith('video/mp4') ? 'mp4' : 'webm'}"` }), { expiresIn: 300 }); }
+  finally { client.destroy(); }
+}
+export async function openRecording(job) {
+  const { GetObjectCommand } = await import('@aws-sdk/client-s3');
+  const client = await storageClient();
+  try {
+    const object = await client.send(new GetObjectCommand({ Bucket: process.env.NEON_BUCKET, Key: job.key }));
+    return { body: object.Body, size: object.ContentLength, close: () => client.destroy() };
+  } catch (error) { client.destroy(); throw error; }
+}
+async function deleteNeon(job) {
+  if (!job.key) return;
+  const expected = `camroom/${job.room}/${job.take}/cam-${String(job.slot).padStart(2, '0')}-${job.id}.`;
+  if (![`${expected}mp4`, `${expected}webm`].includes(job.key)) throw Error('Đường dẫn video không hợp lệ.');
+  const { DeleteObjectCommand } = await import('@aws-sdk/client-s3'); const client = await storageClient();
+  try { for (const key of [job.key, `${job.key}.json`]) await client.send(new DeleteObjectCommand({ Bucket: process.env.NEON_BUCKET, Key: key })); }
   finally { client.destroy(); }
 }
 async function uploadNeon(job, source) {

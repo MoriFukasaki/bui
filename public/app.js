@@ -5,6 +5,7 @@ let me = null, stream = null, controller = null, wake = null, facing = 'environm
 const peers = new Map();
 let mesh = null;
 let liveId = null, signalQueue = Promise.resolve();
+let latestTake = null;
 let armed = false, clockOffset = 0, hostId = null, currentTake = null, storageReady = false, takeTimer;
 let cameraOptions = { bitrate: 10000000, previewBitrate: 400000, audio: false };
 const roomVideos = new Map();
@@ -19,7 +20,7 @@ if (shareCode) $('room-code').value = shareCode;
 $('name').value = localStorage.getItem('camroom-name') || '';
 
 async function api(path, data, session = me) {
-  const res = await fetch(`/api/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(session ? { Authorization: `Bearer ${session.token}` } : {}) }, body: JSON.stringify(data), signal: AbortSignal.timeout(path === 'signal' ? 10000 : 30000) });
+  const res = await fetch(`/api/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(session ? { Authorization: `Bearer ${session.token}` } : {}) }, body: JSON.stringify(data), signal: AbortSignal.timeout(path === 'signal' ? 10000 : ['record/start', 'record/delete'].includes(path) ? 180000 : 30000) });
   const result = await res.json(); if (!res.ok) throw Error(result.error || 'Không kết nối được máy chủ.'); return result;
 }
 function captureConstraints(max = 3) {
@@ -49,7 +50,8 @@ async function join(create = false) {
     mesh = new CameraMesh({ selfId: me.id, peers, getStream: () => stream, getConfiguration: () => session,
       getPreview: () => ({ bitrate: cameraOptions.previewBitrate, fps: me?.maxCameras > 3 ? 15 : 24, maxDimension: me?.maxCameras > 3 ? 854 : 1280 }),
       send: data => api('signal', data, session), onStream: attachRemoteStream, onState: connectionState });
-    hostId = me.hostId; storageReady = me.storage; currentTake = me.take; armed = false;
+    hostId = me.hostId; storageReady = me.storage; currentTake = me.take; latestTake = me.latestTake; armed = false;
+    await recording.reconcile(me.code, latestTake, (me.recordings || []).map(job => job.id));
     roomVideos.clear(); for (const job of me.recordings || []) roomVideos.set(job.id, job);
     let best = Infinity;
     for (let i = 0; i < 3; i++) { const start = Date.now(), server = await api('time', {}), end = Date.now(); if (end - start < best) { best = end - start; clockOffset = server.now - (start + end) / 2; } }
@@ -95,7 +97,8 @@ async function readEvents(session, signal) {
 async function handleEvent(type, data) {
   if (type === 'welcome') {
     $('connection').textContent = 'Đã kết nối phòng'; liveId = data.live;
-    hostId = data.hostId; storageReady = data.storage; currentTake = data.take;
+    hostId = data.hostId; storageReady = data.storage; currentTake = data.take; latestTake = data.latestTake;
+    await recording.reconcile(me.code, latestTake, (data.recordings || []).map(job => job.id));
     for (const job of data.recordings || []) roomVideos.set(job.id, job);
     for (const p of data.peers) peers.set(p.id, p);
     render(); renderSettings(); updateRecordingUI(); await publishCamera();
@@ -117,9 +120,15 @@ async function handleEvent(type, data) {
   if (type === 'camera-config') { await applyCameraConfig(data); }
   if (type === 'record-start') { await recording.start({ ...data, clockOffset }, data.scheduledAt - (Date.now() + clockOffset)); }
   if (type === 'record-stop') { recording.stop(data.id, Math.max(0, data.stopAt - Date.now() - clockOffset)).catch(e => message(e.message)); }
-  if (type === 'take') { currentTake = data; for (const job of data.recordings || []) roomVideos.set(job.id, job); updateRecordingUI(); }
-  if (type === 'recording-status') { roomVideos.set(data.id, data); updateRecordingUI(); }
-  if (type === 'neon-recordings') { for (const job of data) roomVideos.set(job.id, job); renderRoomVideos(); }
+  if (type === 'recordings-deleted') { for (const id of data.ids) roomVideos.delete(id); await recording.discard(data.ids); renderRoomVideos(); }
+  if (type === 'recordings-reset') {
+    latestTake = data.take; roomVideos.clear();
+    currentTake = { id: data.take, active: true, preparing: true, cameraIds: [] };
+    await recording.retainRoomTake(data.room, data.take); updateRecordingUI();
+  }
+  if (type === 'take') { currentTake = data; for (const job of data?.recordings || []) roomVideos.set(job.id, job); updateRecordingUI(); }
+  if (type === 'recording-status' && data.take === latestTake) { roomVideos.set(data.id, data); updateRecordingUI(); }
+  if (type === 'neon-recordings') { for (const job of data) if (job.take === latestTake && job.state !== 'deleted') roomVideos.set(job.id, job); renderRoomVideos(); }
   if (type === 'cloud-status') $('cloud-status').textContent = data.status === 'live' ? 'Neon Realtime: đang đồng bộ video' : `Neon Realtime: ${data.status}. Trạng thái trực tiếp vẫn qua máy chủ phòng.`;
 }
 function updateNetworkNote() {
@@ -202,7 +211,7 @@ async function leave() {
   await recording.stop(); armed = false;
   const old = me; me = null; controller?.abort(); controller = null;
   mesh?.close(); mesh = null; peers.clear();
-  hostId = null; currentTake = null; clearInterval(takeTimer);
+  hostId = null; currentTake = null; latestTake = null; clearInterval(takeTimer);
   stream?.getTracks().forEach(t => t.stop()); stream = null; paused = false; liveId = null;
   try { await wake?.release(); } catch {} wake = null;
   $('grid').replaceChildren(); $('studio').hidden = true; $('lobby').hidden = false;
@@ -329,16 +338,18 @@ function updateRecordingUI() {
   const owner = hostId === me.id, cameras = [me, ...peers.values()].filter(p => p.role === 'camera');
   $('arm').hidden = me.role !== 'camera'; $('arm').disabled = recording.active || paused;
   $('arm').textContent = armed ? '✓ Máy này sẵn sàng' : 'Sẵn sàng quay trên máy này';
+  $('video-permissions').textContent = owner ? 'Bạn là admin: chỉ bạn được tải hoặc xóa. Bắt đầu lượt mới sẽ xóa vĩnh viễn toàn bộ video cũ của phòng.' : 'Chỉ chủ phòng (admin) được tải hoặc xóa video. Phòng chỉ giữ lượt quay mới nhất.';
   $('record-all').disabled = !owner || Boolean(currentTake?.active) || !storageReady || !cameras.length || cameras.some(p => !p.camera?.ready);
   $('stop-all').disabled = !owner || !currentTake?.active;
   $('apply-camera').disabled = Boolean(currentTake?.active || recording.active);
   document.querySelector('.record-panel').classList.toggle('is-recording', Boolean(currentTake?.active));
   clearInterval(takeTimer);
   function timer() {
+    if (currentTake?.preparing) { $('take-status').textContent = 'Đang xóa lượt cũ và chuẩn bị lượt mới…'; return; }
     if (currentTake?.active) {
       const seconds = (Date.now() + clockOffset - currentTake.scheduledAt) / 1000;
       $('take-status').textContent = seconds < 0 ? `Bắt đầu sau ${Math.ceil(-seconds)} giây…` : `● Đang quay · ${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
-    } else $('take-status').textContent = currentTake ? 'Đã dừng · Đang lưu từng video' : `${cameras.filter(p => p.camera?.ready).length}/${cameras.length} camera sẵn sàng${owner ? ' · Bạn là chủ phòng' : ' · Chủ phòng điều khiển quay'}`;
+    } else $('take-status').textContent = currentTake ? 'Đã dừng · Đang lưu từng video' : `${cameras.filter(p => p.camera?.ready).length}/${cameras.length} camera sẵn sàng${owner ? ' · Bạn là admin của phòng' : ' · Chủ phòng điều khiển quay'}`;
   }
   timer(); if (currentTake?.active) takeTimer = setInterval(timer, 250);
   if (!storageReady) $('cloud-status').textContent = 'Chưa cấu hình Neon Object Storage trên server. Quay chung sẽ bật sau khi cấu hình xong.';
@@ -362,10 +373,20 @@ function renderRoomVideos() {
     const text = document.createElement('span');
     text.textContent = `${job.name} · CAM ${job.slot} · ${job.take} · ${job.captureState === 'failed' ? `Lỗi ghi: ${job.captureError}` : stateLabels[job.state] || job.state} · ${(job.bytes / 1048576).toFixed(1)} MB${job.capture?.width ? ` · ${job.capture.width}×${job.capture.height} · ${(job.capture.encoderBitrate / 1000000).toFixed(1)} Mbps` : ''}`;
     row.append(text);
-    if (job.state === 'uploaded') {
+    if (hostId === me?.id && job.state === 'uploaded') {
       const button = document.createElement('button'); button.className = 'secondary'; button.textContent = 'Tải video Neon';
       button.onclick = async () => { try { const { url } = await api('record/download', { id: job.id }); const link = document.createElement('a'); link.href = url; link.rel = 'noreferrer'; link.click(); } catch (e) { message(e.message); } };
       row.append(button);
+    }
+    if (hostId === me?.id) {
+      const remove = document.createElement('button'); remove.className = 'danger'; remove.textContent = 'Xóa video';
+      remove.disabled = Boolean(currentTake?.active);
+      remove.onclick = async () => {
+        if (remove.dataset.confirm !== 'yes') { remove.dataset.confirm = 'yes'; remove.textContent = 'Bấm lần nữa để xóa vĩnh viễn'; return; }
+        remove.disabled = true;
+        try { await api('record/delete', { id: job.id }); roomVideos.delete(job.id); renderRoomVideos(); }
+        catch (error) { message(error.message); remove.disabled = false; }
+      }; row.append(remove);
     }
     root.append(row);
   }

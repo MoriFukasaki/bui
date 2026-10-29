@@ -6,9 +6,10 @@ export const supportedMime = () => {
 export function createRecordingController({ api, getStream, getOptions, onState, notify, store = createLocalStore({ warn: notify }) }) {
   const putJob = store.put, getJob = store.get, updateJob = store.patch, jobs = store.list, getChunk = store.chunk;
   let active = null;
-  const uploads = new Map(), retries = new Map();
+  const uploads = new Map(), retries = new Map(), discarded = new Set();
   async function uploadRequest(job, suffix, body, type) {
     const response = await fetch(`/api/uploads/${job.id}/${suffix}`, { method: 'POST', headers: { Authorization: `Bearer ${job.token}`, 'Content-Type': type }, body, signal: AbortSignal.timeout(suffix === 'complete' ? 180000 : 30000) });
+    if (response.status === 410) { await discard([job.id]); throw Error('Video đã bị admin xóa.'); }
     const data = await response.json(); if (!response.ok) throw Error(data.error || 'Upload thất bại.'); return data;
   }
   async function refresh() {
@@ -21,17 +22,6 @@ export function createRecordingController({ api, getStream, getOptions, onState,
         const text = document.createElement('span');
         text.textContent = `CAM ${job.slot} · ${job.take} · ${job.uploaded ? 'Đã lưu Neon' : job.error || (job.final ? 'Chờ tải lên' : 'Đang ghi / bản chưa hoàn tất')} · ${(job.bytes / 1048576).toFixed(1)} MB`;
         row.append(text);
-        if (!job.localIncomplete && (job.final || !active || active.id !== job.id)) {
-          const download = document.createElement('button'); download.className = 'secondary'; download.textContent = 'Tải bản trên máy';
-          download.onclick = async () => {
-            try {
-              const chunks = []; for (let i = 0; i < job.count; i++) { const chunk = await getChunk(job.id, i); if (!chunk) throw Error('Bản trên thiết bị thiếu dữ liệu; kiểm tra bản server.'); chunks.push(chunk.blob); }
-              const url = URL.createObjectURL(new Blob(chunks, { type: job.mime })); const link = document.createElement('a');
-              link.href = url; link.download = `cam-${job.slot}-${job.take}${job.final ? '' : '-partial'}.${job.mime.startsWith('video/mp4') ? 'mp4' : 'webm'}`; link.click();
-              setTimeout(() => URL.revokeObjectURL(url), 60000);
-            } catch (e) { notify(e.message); }
-          }; row.append(download);
-        }
         if (job.final && !job.uploaded) {
           const retry = document.createElement('button'); retry.className = 'secondary'; retry.textContent = 'Thử tải lên Neon'; retry.disabled = uploads.has(job.id);
           retry.onclick = () => { retries.delete(job.id); pump(job.id); }; row.append(retry);
@@ -41,6 +31,7 @@ export function createRecordingController({ api, getStream, getOptions, onState,
     } catch (error) { notify(`Không truy cập được bộ nhớ video: ${error.message}`); }
   }
   async function pump(id) {
+    if (discarded.has(id)) return;
     if (uploads.has(id)) return uploads.get(id);
     const retry = retries.get(id); if (retry && (retry.count >= 6 || retry.after > Date.now())) return;
     const task = (async () => {
@@ -48,16 +39,19 @@ export function createRecordingController({ api, getStream, getOptions, onState,
       try {
         job = await getJob(id); if (!job || job.uploaded) return;
         const status = await fetch(`/api/uploads/${id}/status`, { headers: { Authorization: `Bearer ${job.token}` }, signal: AbortSignal.timeout(30000) });
+        if (status.status === 410) { await discard([id]); return; }
         if (!status.ok) throw Error('Không truy cập được phiên upload trên server.');
         const remote = await status.json();
         let index = remote.next || 0; store.acknowledge(id, index);
         while (true) {
           job = await getJob(id);
+          if (!job || discarded.has(id)) return;
           if (index >= job.count) break;
           const chunk = await getChunk(id, index); if (!chunk) throw Error('Thiếu dữ liệu lưu trên máy.');
           await uploadRequest(job, `chunk?index=${index}`, chunk.blob, 'application/octet-stream'); index++; store.acknowledge(id, index);
         }
         job = await getJob(id);
+        if (!job || discarded.has(id)) return;
         if (job.final) {
           await uploadRequest(job, 'complete', JSON.stringify({ count: job.count, mime: job.mime, actualStartedAt: job.actualStartedAt, actualStoppedAt: job.actualStoppedAt, clockOffset: job.clockOffset, capture: job.capture }), 'application/json');
           job.uploaded = true;
@@ -65,6 +59,7 @@ export function createRecordingController({ api, getStream, getOptions, onState,
         await updateJob(id, { error: '', ...(job.uploaded ? { uploaded: true } : {}) });
         retries.delete(id);
       } catch (error) {
+        if (discarded.has(id)) return;
         const count = (retries.get(id)?.count || 0) + 1;
         retries.set(id, { count, after: Date.now() + Math.min(60000, 5000 * 2 ** (count - 1)) });
         if (job) await updateJob(id, { error: error.message }).catch(() => {});
@@ -75,6 +70,7 @@ export function createRecordingController({ api, getStream, getOptions, onState,
     try { await task; } finally { uploads.delete(id); await refresh(); }
   }
   async function start(job, delay) {
+    await retainRoomTake(job.room, job.take);
     if (active) { await api('record/ack', { id: job.id, state: 'failed', error: 'Thiết bị đang xử lý lượt quay trước.' }); return; }
     const source = getStream();
     if (!source || !source.getVideoTracks().some(t => t.readyState === 'live' && t.enabled)) {
@@ -122,6 +118,7 @@ export function createRecordingController({ api, getStream, getOptions, onState,
               if (active === state) { active = null; onState(false); }
               resolve();
             }
+            if (discarded.has(local.id)) return;
             await api('record/ack', { id: local.id, state: state.failed ? 'failed' : 'stopped', error: local.error }).catch(() => {});
             await uploads.get(local.id); if (local.final) await pump(local.id); await refresh();
           };
@@ -149,8 +146,28 @@ export function createRecordingController({ api, getStream, getOptions, onState,
     if (state.recorder.state !== 'inactive') state.recorder.stop();
     await state.complete;
   }
+  async function discard(ids) {
+    for (const id of ids) { discarded.add(id); retries.delete(id); }
+    const state = active;
+    if (state && ids.includes(state.id)) {
+      clearTimeout(state.timer); state.failed = true;
+      if (state.recorder) { if (state.recorder.state !== 'inactive') state.recorder.stop(); await state.complete; await state.writing; }
+      else { active = null; onState(false); }
+    }
+    for (const id of ids) await store.remove(id);
+    await refresh();
+  }
+  async function retainRoomTake(room, take) {
+    const old = (await jobs()).filter(job => job.room === room && job.take !== take);
+    if (old.length) await discard(old.map(job => job.id));
+  }
+  async function reconcile(room, take, ids) {
+    const allowed = new Set(ids);
+    const old = (await jobs()).filter(job => job.room === room && (job.take !== take || !allowed.has(job.id)));
+    if (old.length) await discard(old.map(job => job.id));
+  }
   window.addEventListener('online', async () => { for (const job of await jobs()) if (job.final && !job.uploaded) pump(job.id); });
   setInterval(async () => { for (const job of await jobs()) if (!job.uploaded && (job.final || active?.id === job.id)) pump(job.id); }, 5000);
   window.addEventListener('beforeunload', e => { if (active || uploads.size || store.hasPendingVolatile()) { e.preventDefault(); e.returnValue = ''; } });
-  return { start, stop, refresh, get active() { return Boolean(active); } };
+  return { start, stop, refresh, discard, retainRoomTake, reconcile, get active() { return Boolean(active); } };
 }

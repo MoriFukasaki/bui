@@ -9,7 +9,7 @@
     "build": "node scripts/build.mjs",
     "check:publish": "node scripts/check-publish.mjs",
     "check:publish:test": "node scripts/prove-publish-check.mjs",
-    "admin:password": "node scripts/admin-password.mjs",
+    "prestart": "node scripts/migrate.mjs",
     "db:migrate": "node scripts/migrate.mjs"
   },
   "engines": {

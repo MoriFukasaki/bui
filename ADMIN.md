@@ -1,30 +1,29 @@
-# Tài khoản quản trị video trên Render
+# Chủ phòng là admin, chỉ giữ lượt quay mới nhất
 
-Trang `/admin` dành cho một tài khoản quản trị do bạn cấu hình. Không có tài khoản/mật khẩu mặc định, không mở đăng ký. Admin xem video của mọi phòng (kể cả phòng đã đóng), lọc theo phòng/trạng thái, xem lỗi và tải file gốc. Danh sách lấy từ Postgres, không phụ thuộc phòng còn trong RAM. Trang này không xóa video.
+Không cần tài khoản admin riêng hoặc biến ADMIN_USERNAME / ADMIN_PASSWORD_HASH. Người **tạo phòng** là admin của chính phòng đó, dùng được cả vai trò Chỉ xem hoặc Phát camera. Các biến admin cũ có thể bỏ khỏi Render. Trang /admin và quyền truy cập video của mọi phòng đã được gỡ.
 
-1. Trên máy của bạn, mở terminal trong thư mục mã nguồn, chạy `npm run admin:password`.
-2. Nhập mật khẩu riêng tối thiểu 12 ký tự rồi Enter. Lúc nhập sẽ không hiện ký tự. Lệnh chỉ in **hash scrypt**, không in mật khẩu.
-3. Vào Render → Camroom → Environment → Add Environment Variable:
+- Chỉ admin có nút và quyền API **tải / xóa** video. Thành viên xem hình và trạng thái, camera gửi video lên nhưng không có nút tải bản tạm.
+- Admin bấm **Quay lượt mới (xóa lượt cũ)**: server xóa video, sidecar và bản spool của các lượt cũ **trong cùng phòng**, xóa metadata tương ứng; sau đó mới tạo lượt mới và đếm ngược. Không đụng phòng khác. Không có bước đợi quay xong lượt mới rồi mới xóa lượt cũ.
+- Xóa là vĩnh viễn. Tải các video muốn giữ trước khi bấm quay tiếp. Nếu xóa cũ thất bại, server không bắt đầu ghi lượt mới; các file đã xóa thành công trước lỗi không thể rollback. Thử lại để dọn nốt.
+- Nút Xóa video cho phép xóa từng clip khi đã dừng quay. Bấm lần đầu hiện xác nhận ngay trên nút, bấm lần nữa để xóa.
+- Upload cũ bị vô hiệu hóa; camera gửi trễ không thể tạo lại video đã xóa. Thiết bị đang online dọn bản tạm ngay; thiết bị offline dọn khi vào lại phòng/nhận trạng thái xóa. Lỗi bộ nhớ có thể khiến dọn dữ liệu cục bộ chưa hoàn tất; server vẫn từ chối quyền upload/tải.
 
-   | Key | Value |
-   | --- | --- |
-   | `ADMIN_USERNAME` | Tên đăng nhập bạn tự chọn, ví dụ `mori` |
-   | `ADMIN_PASSWORD_HASH` | Toàn bộ chuỗi bắt đầu bằng `scrypt:` do lệnh trên tạo ra |
-   | `NODE_ENV` | `production` |
+## Quyền chủ phòng và tải lại trang
 
-   Với hash, chỉ copy phần **sau** `ADMIN_PASSWORD_HASH=`. Không thêm dấu nháy. Không gửi mật khẩu/hash vào chat hoặc commit chúng vào GitHub.
-4. Save, rebuild, deploy. Mở **link HTTPS của app + `/admin`** (hoặc bấm Quản trị video ở đầu trang). Đăng nhập bằng tên đã chọn và **mật khẩu gốc**, không phải hash.
-5. Bấm Lọc / Làm mới để lấy trạng thái mới. Bấm Tải video gốc. Link tải hết hạn sau 5 phút; bấm nút lần nữa để lấy link mới.
+Quyền admin được lưu bằng cookie riêng của phòng (HttpOnly, SameSite=Strict, Secure trên production), chỉ lưu hash trong Postgres. Mã/link mời không chứa quyền admin. Chủ phòng mất kết nối **không** làm người khác lên admin.
 
-Đổi mật khẩu: chạy lại lệnh, thay hash trong Render rồi deploy. Phiên đăng nhập hết hạn sau 8 giờ, bị hủy khi server khởi động lại/đăng xuất. Cookie HttpOnly, SameSite=Strict, Secure trong production; các thao tác admin yêu cầu CSRF token. Đăng nhập sai bị giới hạn 10 lần/15 phút theo kết nối server (Render proxy có thể dùng chung giới hạn này cho nhiều người). Đây là tài khoản quản trị đơn cho một instance; không phải hệ thống đăng ký nhiều người dùng.
+Tải lại trang, nhập lại tên và tham gia **đúng mã phòng trên cùng trình duyệt** để khôi phục quyền. Có thể chọn Chỉ xem nếu không muốn bật camera. Sau server restart, admin có thể mở lại phòng từ metadata trong Neon. Cookie có hạn 30 ngày; không xóa cookie/dùng trình duyệt ẩn danh nếu cần giữ quyền. Không tự nhận lại chủ phòng bằng mã mời khi mất cookie.
 
-## Kiểm tra chất lượng và điện thoại lỗi lưu
+Mỗi lượt xem trước vẫn dùng WebRTC; tải file qua server kiểm tra cookie admin mỗi lần, không gửi URL S3 dùng chung cho các máy. Bản đã tải về trước khi xóa không thể thu hồi. Chủ thiết bị camera vẫn kiểm soát phần cứng và dữ liệu trên máy của họ; đây là phân quyền ứng dụng, không phải DRM.
 
-1. Sau khi deploy, tải lại trang trên **tất cả** máy để nhận mã mới, tạo phòng mới. Ghi mặc định yêu cầu 1920×1080, 30 fps, 10 Mbps; số lượng máy chỉ làm giảm bản xem trước. Thiết bị có thể chọn chế độ thấp hơn nếu không hỗ trợ; xem dòng **Thực tế** trong cấu hình và thông số ở danh sách video.
-2. Muốn buộc 1080p: chọn đúng máy → 1080p → 30 fps → 10 hoặc 20 Mbps → Áp dụng. Nếu máy không hỗ trợ, app báo lỗi; kiểm tra dòng Thực tế trước khi bấm Sẵn sàng. Bitrate encoder do trình duyệt chọn có thể khác yêu cầu. Web ghi trực tiếp từ camera, server không nén hay resize file tải về.
-3. Bấm Sẵn sàng trên từng máy, quay thử 10–15 giây rồi Dừng tất cả. Giữ trang mở, màn hình sáng. Xác nhận **tất cả** video báo Đã lưu Neon trước khi thoát.
-4. Mở file tải về, xem Properties/Details hoặc MediaInfo để kiểm tra kích thước khung hình. Thông số trong app là thông số camera/encoder báo, file thực tế là phép kiểm tra cuối cùng. Video cũ quay 480p/720p không thể khôi phục chi tiết 1080p.
-5. Nếu bộ nhớ điện thoại lỗi, app dùng RAM dự phòng tối đa 64 MB và giải phóng các đoạn sau khi server xác nhận nhận. Cần giữ trang mở; RAM không sống qua reload/đóng tab. Khi mạng quá chậm làm đầy RAM, app dừng và báo lỗi thay vì tiếp tục quay mất dữ liệu. Bản dự phòng không có đủ đoạn trên máy thì chỉ tải bản hoàn tất trên Neon.
-6. Lỗi giờ kèm tên và nội dung lỗi gốc. Nếu còn lỗi, gửi dòng lỗi và model điện thoại/trình duyệt, không gửi credential. Video lỗi từ bản cũ: thử Tải bản trên máy ở chính điện thoại quay; không bảo đảm phục hồi nếu phần cuối đã mất.
+## Deploy và test
 
-Render free có đĩa tạm: server nhận chunk chưa đồng nghĩa video đã lưu Neon. Không deploy/restart trong lúc ghi/upload. Dùng persistent disk cho spool nếu cần giữ đoạn chưa hoàn tất qua restart.
+1. Deploy commit mới trên Render. `npm start` tự chạy migrations idempotent 001 và 002 trước khi mở server; dùng DATABASE_URL_UNPOOLED khi có. Không cần thêm biến admin.
+2. Tạo **phòng mới** sau deploy, dùng máy tạo phòng làm admin; vào bằng điện thoại khác để thử. Video/phòng tạo trước phiên bản này không được tự gán admin hoặc xóa hàng loạt.
+3. Mặc định ghi yêu cầu 1080p / 30 fps / 10 Mbps; xem dòng Thực tế để kiểm tra máy có đáp ứng. Bản xem trước giảm chất lượng độc lập.
+4. Tất cả máy bấm Sẵn sàng, admin quay 10–15 giây rồi dừng. Chờ mọi clip báo Đã lưu Neon; chỉ admin có nút tải/xóa.
+5. Tải lại trang admin, tham gia đúng phòng trên cùng trình duyệt và xác nhận còn quyền. Thành viên không được kế thừa quyền khi admin thoát.
+6. Bấm quay lượt tiếp: các clip cũ biến mất; chỉ xuất hiện clip của lượt mới. Link tải cũ và upload cũ phải bị từ chối. Phòng khác không đổi.
+7. Thử Xóa video trên một clip đã dừng, xác nhận clip biến mất trên tất cả máy.
+
+Render free có đĩa tạm: không restart/deploy giữa lượt ghi/upload. RAM dự phòng trên điện thoại tối đa 64 MB cho các đoạn chưa được server nhận; giữ trang mở đến khi upload xong. Thông tin phòng/quyền admin và video đã lưu ở Neon sống qua restart; spool chưa hoàn tất cần persistent disk để sống qua restart.
