@@ -7,7 +7,8 @@ let mesh = null;
 let liveId = null, signalQueue = Promise.resolve();
 let latestTake = null;
 let armed = false, clockOffset = 0, hostId = null, currentTake = null, storageReady = false, takeTimer;
-let cameraOptions = { bitrate: 10000000, previewBitrate: 400000, audio: false };
+const DEFAULT_CAMERA_OPTIONS = Object.freeze({ bitrate: 10000000, previewBitrate: 400000, audio: false });
+let cameraOptions = { ...DEFAULT_CAMERA_OPTIONS };
 const roomVideos = new Map();
 const message = text => { $('message').textContent = text; $('message').hidden = !text; };
 const recording = createRecordingController({ api, getStream: () => stream, getOptions: () => cameraOptions, notify: message, onState: active => {
@@ -325,10 +326,31 @@ function renderSettings(selected = $('config-target').value) {
     } else continue;
     input.dataset.constraint = key; label.append(input); root.append(label);
   }
-  $('apply-camera').disabled = Boolean(currentTake?.active || recording.active || !p?.camera);
+  const locked = Boolean(currentTake?.active || recording.active || !p?.camera);
+  $('apply-camera').disabled = locked; $('reset-camera').disabled = locked;
+}
+async function resetCameraConfig() {
+  if (!stream || recording.active) return;
+  armed = false;
+  const track = stream.getVideoTracks()[0], previous = track.getConstraints(), previousOptions = cameraOptions;
+  try {
+    // An empty set clears custom advanced constraints (zoom, focus, colour,
+    // exposure, etc.) before restoring the app's safe capture defaults.
+    await track.applyConstraints();
+    await track.applyConstraints(captureConstraints(me.maxCameras).video);
+    cameraOptions = { ...DEFAULT_CAMERA_OPTIONS };
+    for (const audioTrack of stream.getAudioTracks()) { stream.removeTrack(audioTrack); audioTrack.stop(); }
+    await mesh?.refreshPreview(); await publishCamera(); renderSettings();
+    message('Đã khôi phục cấu hình camera mặc định. Bấm “Sẵn sàng quay” lại khi cần quay.');
+  } catch (error) {
+    cameraOptions = previousOptions;
+    try { await track.applyConstraints(previous); } catch {}
+    await publishCamera(error.message); message(`Không thể khôi phục mặc định: ${error.message}`);
+  }
 }
 async function applyCameraConfig(config) {
   if (!stream || recording.active) return;
+  if (config?.reset) return resetCameraConfig();
   armed = false;
   const track = stream.getVideoTracks()[0], previous = track.getConstraints(), caps = track.getCapabilities?.() || {};
   try {
@@ -360,7 +382,8 @@ function updateRecordingUI() {
   $('video-permissions').textContent = owner ? 'Bạn là admin: chỉ bạn được tải hoặc xóa. Bắt đầu lượt mới sẽ xóa vĩnh viễn toàn bộ video cũ của phòng.' : 'Chỉ chủ phòng (admin) được tải hoặc xóa video. Phòng chỉ giữ lượt quay mới nhất.';
   $('record-all').disabled = !owner || Boolean(currentTake?.active) || !storageReady || !cameras.length || cameras.some(p => !p.camera?.ready);
   $('stop-all').disabled = !owner || !currentTake?.active;
-  $('apply-camera').disabled = Boolean(currentTake?.active || recording.active);
+  const settingsLocked = Boolean(currentTake?.active || recording.active);
+  $('apply-camera').disabled = settingsLocked; $('reset-camera').disabled = settingsLocked;
   document.querySelector('.record-panel').classList.toggle('is-recording', Boolean(currentTake?.active));
   clearInterval(takeTimer);
   function timer() {
@@ -428,6 +451,12 @@ $('camera-config-form').onsubmit = async e => {
   const [width, height] = $('resolution').value.split('x').map(Number), advanced = {};
   for (const input of $('device-controls').querySelectorAll('[data-constraint]')) advanced[input.dataset.constraint] = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : input.value;
   try { await api('camera-config', { id: $('config-target').value, config: { width, height, fps: Number($('fps').value), bitrate: Number($('record-bitrate').value), previewBitrate: Number($('preview-bitrate').value), audio: $('record-audio').checked, advanced } }); }
+  catch (error) { message(error.message); }
+};
+$('reset-camera').onclick = async () => {
+  const target = $('config-target').value;
+  if (!target || !confirm('Khôi phục mặc định cho camera đã chọn? Các chỉnh sửa zoom, màu, nét, FPS và bitrate sẽ bị bỏ.')) return;
+  try { await api('camera-config', { id: target, config: { reset: true } }); }
   catch (error) { message(error.message); }
 };
 $('record-all').onclick = async () => { $('record-all').disabled = true; try { await api('record/start', {}); } catch (e) { message(e.message); updateRecordingUI(); } };
