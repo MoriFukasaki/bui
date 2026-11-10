@@ -172,10 +172,28 @@ function connectionState(other, direction, state) {
 function attachRemoteStream(other, remoteStream, track) {
   const card = document.getElementById(`cam-${other}`), video = card?.querySelector('video'); if (!video) return;
   const playButton = card.querySelector('.play-camera');
-  const play = () => video.play().then(() => { playButton.hidden = true; updateNetworkNote(); }).catch(() => { playButton.hidden = false; status(other, 'Trình duyệt chặn tự phát. Bấm Hiện hình.'); });
+  const preparePlayback = () => {
+    // Properties alone are not consistently honoured by Android WebViews.  Keep
+    // both attributes and properties in sync before each user-initiated play.
+    video.muted = true; video.defaultMuted = true; video.volume = 0;
+    video.autoplay = true; video.playsInline = true;
+    video.setAttribute('muted', ''); video.setAttribute('playsinline', '');
+  };
+  const play = async () => {
+    preparePlayback();
+    try {
+      await video.play(); playButton.hidden = true; updateNetworkNote();
+    } catch (error) {
+      playButton.hidden = false;
+      if (error?.name === 'NotAllowedError') status(other, 'Trình duyệt yêu cầu chạm để bật video. Bấm “▶ Bật video”.');
+      else if (error?.name === 'AbortError') status(other, 'Luồng camera đang đổi do mạng yếu; đang chờ kết nối ổn định…');
+      else status(other, `Không phát được video (${error?.name || 'lỗi mạng'}). Bấm Kết nối lại.`);
+    }
+  };
   video.onplaying = () => { playButton.hidden = true; status(other, 'Đang nhận hình', true); updateNetworkNote(); };
-  video.srcObject = remoteStream; video.muted = true; video.playsInline = true;
-  playButton.onclick = play;
+  preparePlayback(); video.srcObject = remoteStream;
+  video.onloadedmetadata = () => { play(); };
+  playButton.onclick = () => { play(); };
   track.onmute = () => { if (video.srcObject === remoteStream) status(other, 'Camera tạm dừng hoặc mạng yếu'); };
   track.onunmute = () => { if (video.srcObject === remoteStream) play(); };
   play();
@@ -194,7 +212,7 @@ function render() {
   for (const p of cameras) {
     if (document.getElementById(`cam-${p.id}`)) continue;
     const card = document.createElement('article'); card.className = 'camera'; card.id = `cam-${p.id}`;
-    card.innerHTML = '<div class="video-wrap"><video autoplay playsinline muted></video><span class="overlay">Đang kết nối camera…</span><span class="badge"></span></div><div class="cam-info"><h3></h3><p class="cam-status">Đang kết nối</p><p class="send-status"></p><div class="cam-rec"></div><div class="cam-buttons"><button class="tally">Lên hình</button><button class="secondary expand">⛶ Phóng to</button><button class="secondary reconnect">↻ Kết nối lại</button><button class="secondary play-camera" hidden>▶ Hiện hình</button></div></div>';
+    card.innerHTML = '<div class="video-wrap"><video autoplay playsinline muted></video><span class="overlay">Đang kết nối camera…</span><span class="badge"></span></div><div class="cam-info"><h3></h3><p class="cam-status">Đang kết nối</p><p class="send-status"></p><div class="cam-rec"></div><div class="cam-buttons"><button class="tally">Đánh dấu lên hình</button><button class="secondary expand">⛶ Phóng to</button><button class="secondary reconnect">↻ Kết nối lại</button><button class="secondary play-camera" hidden>▶ Bật video</button></div></div>';
     const video = card.querySelector('video'); video.id = `video-${p.id}`;
     card.querySelector('h3').textContent = `${p.name}${p.id === me.id ? ' (bạn)' : ''}`;
     card.querySelector('.badge').textContent = `CAM ${String(p.slot).padStart(2, '0')}`;
@@ -221,7 +239,7 @@ function updateLive() {
   $('on-air').textContent = p ? `● ĐANG LÊN HÌNH: ${p.name}` : 'Chưa chọn máy lên hình';
   document.querySelectorAll('.camera:not(.empty)').forEach(card => {
     const active = card.id === `cam-${liveId}`; card.classList.toggle('live', active);
-    card.querySelector('.tally').textContent = active ? '● Đang lên hình' : 'Lên hình';
+    card.querySelector('.tally').textContent = active ? '● Đang lên hình' : 'Đánh dấu lên hình';
   });
 }
 function watchTrack(track) {
