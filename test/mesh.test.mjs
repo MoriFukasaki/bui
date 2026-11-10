@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CameraMesh } from '../public/mesh.js';
+import { CameraMesh, lowBandwidthPreview } from '../public/mesh.js';
 
 class FakePeer {
   constructor(configuration, failOffer = false) {
@@ -67,6 +67,22 @@ test('all ten cameras negotiate all 90 directions, even when ICE arrives before 
       for (const pc of mesh.outgoing.values()) { assert.equal(pc.remoteDescription.type, 'answer'); assert.equal(pc.candidates.length, 1); assert.equal(pc.parameters.encodings[0].maxBitrate, 400000); }
       for (const pc of mesh.incoming.values()) { assert.equal(pc.remoteDescription.type, 'offer'); assert.equal(pc.candidates.length, 1); }
     }
+  } finally { net.close(); }
+});
+test('three cameras cap only preview encoding before signaling; source capture stays full quality', async () => {
+  const net = network(3);
+  try {
+    for (const { mesh } of net.nodes) mesh.getPreview = () => lowBandwidthPreview();
+    await Promise.all(net.nodes.map(node => node.mesh.connectAll()));
+    for (const { mesh } of net.nodes) for (const pc of mesh.outgoing.values()) {
+      assert.equal(pc.parameters.encodings[0].maxBitrate, 100000);
+      assert.equal(pc.parameters.encodings[0].maxFramerate, 3);
+      assert.equal(pc.parameters.encodings[0].scaleResolutionDownBy, 4);
+      assert.deepEqual(pc.getSenders()[0].track.getSettings(), { width: 1920, height: 1080 });
+    }
+    await net.flush();
+    for (const { mesh } of net.nodes) assert.equal(mesh.incoming.size, 2);
+    assert.deepEqual(lowBandwidthPreview({ bitrate: 100000, fps: 5 }, { saveData: true }), { bitrate: 80000, fps: 2, maxDimension: 320 });
   } finally { net.close(); }
 });
 test('one failed offer cannot prevent negotiation with other cameras', async () => {

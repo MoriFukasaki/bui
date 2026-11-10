@@ -1,5 +1,5 @@
 import { createRecordingController, supportedMime } from './recorder.js';
-import { CameraMesh } from './mesh.js';
+import { CameraMesh, lowBandwidthPreview } from './mesh.js';
 const $ = id => document.getElementById(id);
 let me = null, stream = null, controller = null, wake = null, facing = 'environment', paused = false, joining = false;
 const peers = new Map();
@@ -7,14 +7,15 @@ let mesh = null;
 let liveId = null, signalQueue = Promise.resolve();
 let latestTake = null;
 let armed = false, clockOffset = 0, hostId = null, currentTake = null, storageReady = false, takeTimer;
-const DEFAULT_CAMERA_OPTIONS = Object.freeze({ bitrate: 10000000, previewBitrate: 400000, audio: false });
+const DEFAULT_CAMERA_OPTIONS = Object.freeze({ bitrate: 10000000, previewBitrate: 100000, previewFps: 3, audio: false });
 let cameraOptions = { ...DEFAULT_CAMERA_OPTIONS };
 const roomVideos = new Map();
 const message = text => { $('message').textContent = text; $('message').hidden = !text; };
 const recording = createRecordingController({ api, getStream: () => stream, getOptions: () => cameraOptions, notify: message, onState: active => {
   $('flip').disabled = $('pause').disabled = active;
   $('apply-camera').disabled = active; publishCamera().catch(() => {}); updateRecordingUI();
-} });
+}, canUpload: () => !currentTake?.active || !roomConnected });
+let roomConnected = false;
 recording.refresh();
 const shareCode = new URL(location.href).searchParams.get('room');
 if (shareCode) $('room-code').value = shareCode;
@@ -25,16 +26,7 @@ $('name').value = localStorage.getItem('camroom-name') || '';
 // continuity over sharpness.  The recorded source keeps its configured bitrate.
 function previewProfile() {
   const network = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-  const type = network?.effectiveType;
-  const slow = network?.saveData || type === 'slow-2g' || type === '2g' || Number(network?.downlink) > 0 && Number(network.downlink) <= 1;
-  const limited = type === '3g' || Number(network?.downlink) > 0 && Number(network.downlink) <= 2;
-  const bitrate = Math.min(cameraOptions.previewBitrate, slow ? 120000 : limited ? 220000 : cameraOptions.previewBitrate);
-  return {
-    bitrate,
-    fps: slow ? 8 : limited ? 12 : me?.maxCameras > 3 ? 15 : 24,
-    maxDimension: slow ? 480 : limited ? 640 : me?.maxCameras > 3 ? 854 : 1280,
-    limited: Boolean(slow || limited),
-  };
+  return lowBandwidthPreview({ bitrate: cameraOptions.previewBitrate, fps: cameraOptions.previewFps }, network);
 }
 
 async function api(path, data, session = me) {
@@ -87,7 +79,12 @@ async function join(create = false) {
     render(); renderSettings(); updateRecordingUI(); message(''); keepAwake();
     controller = new AbortController();
     readEvents(me, controller.signal).catch(async error => {
-      if (error.name !== 'AbortError' && me) { await leave(); message('Mất kết nối máy chủ. Kiểm tra mạng rồi tham gia lại phòng.'); }
+      if (error.name !== 'AbortError' && me) {
+        roomConnected = false;
+        $('connection').textContent = 'Mất kết nối phòng';
+        if (recording.active) message('Mất mạng: máy vẫn ghi video. Khi xong, bấm “Dừng máy này” bên dưới; giữ trang mở để lưu và upload.');
+        else message('Mất kết nối phòng. Video chưa upload vẫn giữ trên máy; giữ trang mở để thử tải lên.');
+      }
     });
   } catch (error) {
     if (me) await leave(); else { stream?.getTracks().forEach(t => t.stop()); stream = null; }
@@ -114,6 +111,7 @@ async function readEvents(session, signal) {
 }
 async function handleEvent(type, data) {
   if (type === 'welcome') {
+    roomConnected = true;
     $('connection').textContent = 'Đã kết nối phòng'; liveId = data.live;
     hostId = data.hostId; storageReady = data.storage; currentTake = data.take; latestTake = data.latestTake;
     await recording.reconcile(me.code, latestTake, (data.recordings || []).map(job => job.id));
@@ -154,7 +152,7 @@ function updateNetworkNote() {
   const cameras = [...peers.values()].filter(p => p.role === 'camera');
   const received = cameras.filter(p => { const video = document.getElementById(`video-${p.id}`); return video?.srcObject && video.readyState >= 2 && !video.paused; }).length;
   const profile = previewProfile();
-  const quality = profile.limited ? ` Mạng yếu: xem trước tự hạ còn ${(profile.bitrate / 1000).toFixed(0)} kbps để giữ kết nối; video lưu không đổi chất lượng.` : '';
+  const quality = ` Xem trước nhẹ: tối đa ${profile.fps} FPS · ${profile.maxDimension} px · ${Math.round(profile.bitrate / 1000)} Kbps/máy nhận. Ghi nét trên máy, upload sau khi dừng.`;
   $('network-status').textContent = `Đang xem ${received}/${cameras.length} camera khác. ${me.turnConfigured ? 'Đã cấu hình chuyển tiếp mạng (TURN).' : 'Chưa có TURN: các máy khác Wi-Fi hoặc 4G/5G có thể không thấy nhau. Cần cấu hình TURN trên server.'}${quality}`;
 }
 function connectionState(other, direction, state) {
@@ -248,6 +246,7 @@ function watchTrack(track) {
 async function leave() {
   await recording.stop(); armed = false;
   const old = me; me = null; controller?.abort(); controller = null;
+  roomConnected = false;
   mesh?.close(); mesh = null; peers.clear();
   hostId = null; currentTake = null; latestTake = null; clearInterval(takeTimer);
   stream?.getTracks().forEach(t => t.stop()); stream = null; paused = false; liveId = null;
@@ -308,7 +307,7 @@ async function publishCamera(error = '') {
   const track = stream.getVideoTracks()[0], caps = track.getCapabilities?.() || {};
   const capabilities = Object.fromEntries(Object.keys(advancedControls).filter(key => key in caps).map(key => [key, caps[key]]));
   capabilities.width = caps.width; capabilities.height = caps.height; capabilities.frameRate = caps.frameRate;
-  const settings = { ...track.getSettings(), recordBitrate: cameraOptions.bitrate, previewBitrate: cameraOptions.previewBitrate, audio: cameraOptions.audio };
+  const settings = { ...track.getSettings(), recordBitrate: cameraOptions.bitrate, previewBitrate: cameraOptions.previewBitrate, previewFps: cameraOptions.previewFps, audio: cameraOptions.audio };
   delete settings.deviceId; delete settings.groupId;
   const camera = { ready: armed && !paused && !recording.active && track.readyState === 'live' && Boolean(supportedMime()), settings, capabilities, mime: supportedMime(), error };
   me.camera = camera; await api('camera-state', camera);
@@ -327,7 +326,7 @@ function renderSettings(selected = $('config-target').value) {
   if ([...$('resolution').options].some(o => o.value === resolution)) $('resolution').value = resolution;
   $('fps').value = Math.round(settings.frameRate || 30);
   if (caps.frameRate) { $('fps').min = Math.max(1, Math.ceil(caps.frameRate.min)); $('fps').max = Math.floor(caps.frameRate.max); }
-  $('record-bitrate').value = String(settings.recordBitrate || 10000000); $('preview-bitrate').value = String(settings.previewBitrate || 400000); $('record-audio').checked = Boolean(settings.audio);
+  $('record-bitrate').value = String(settings.recordBitrate || 10000000); $('preview-bitrate').value = String(settings.previewBitrate || 100000); $('preview-fps').value = String(settings.previewFps || 3); $('record-audio').checked = Boolean(settings.audio);
   const root = $('device-controls'); root.replaceChildren();
   for (const [key, title] of Object.entries(advancedControls)) {
     const cap = caps[key]; if (cap === undefined) continue;
@@ -372,8 +371,8 @@ async function applyCameraConfig(config) {
   armed = false;
   const track = stream.getVideoTracks()[0], previous = track.getConstraints(), caps = track.getCapabilities?.() || {};
   try {
-    const { width, height, fps, bitrate, previewBitrate, audio } = config;
-    if (![width, height, fps, bitrate, previewBitrate].every(Number.isFinite) || width < 160 || width > 7680 || height < 120 || height > 4320 || fps < 1 || fps > 120 || bitrate < 100000 || bitrate > 50000000 || previewBitrate < 100000 || previewBitrate > 5000000) throw Error('Giá trị cấu hình ngoài phạm vi cho phép.');
+    const { width, height, fps, bitrate, previewBitrate, previewFps = 3, audio } = config;
+    if (![width, height, fps, bitrate, previewBitrate, previewFps].every(Number.isFinite) || width < 160 || width > 7680 || height < 120 || height > 4320 || fps < 1 || fps > 120 || bitrate < 100000 || bitrate > 50000000 || previewBitrate < 50000 || previewBitrate > 150000 || ![2, 3, 5].includes(previewFps)) throw Error('Giá trị cấu hình ngoài phạm vi cho phép.');
     const advanced = {};
     for (const [key, value] of Object.entries(config.advanced || {})) {
       const cap = caps[key]; if (!(key in advancedControls) || cap === undefined) throw Error(`Camera không hỗ trợ ${key}.`);
@@ -383,7 +382,7 @@ async function applyCameraConfig(config) {
     }
     const portrait = (track.getSettings().height || 0) > (track.getSettings().width || 0);
     await track.applyConstraints({ width: { exact: portrait ? height : width }, height: { exact: portrait ? width : height }, frameRate: { ideal: fps, max: fps }, ...(Object.keys(advanced).length ? { advanced: [advanced] } : {}) });
-    cameraOptions = { bitrate, previewBitrate, audio: Boolean(audio) };
+    cameraOptions = { bitrate, previewBitrate, previewFps, audio: Boolean(audio) };
     if (!cameraOptions.audio) for (const audioTrack of stream.getAudioTracks()) { stream.removeTrack(audioTrack); audioTrack.stop(); }
     await Promise.allSettled([...mesh.outgoing.values()].map(pc => mesh.applyPreview(pc)));
     await publishCamera(); message('Đã áp dụng cấu hình. Bấm “Sẵn sàng quay” trên điện thoại này trước lượt quay tiếp theo.');
@@ -397,8 +396,9 @@ function updateRecordingUI() {
   const owner = hostId === me.id, cameras = [me, ...peers.values()].filter(p => p.role === 'camera');
   $('arm').hidden = me.role !== 'camera'; $('arm').disabled = recording.active || paused;
   $('arm').textContent = armed ? '✓ Máy này sẵn sàng' : 'Sẵn sàng quay trên máy này';
-  $('video-permissions').textContent = owner ? 'Bạn là admin: chỉ bạn được tải hoặc xóa. Bắt đầu lượt mới sẽ xóa vĩnh viễn toàn bộ video cũ của phòng.' : 'Chỉ chủ phòng (admin) được tải hoặc xóa video. Phòng chỉ giữ lượt quay mới nhất.';
-  $('record-all').disabled = !owner || Boolean(currentTake?.active) || !storageReady || !cameras.length || cameras.some(p => !p.camera?.ready);
+  const pendingUpload = [...roomVideos.values()].some(job => job.state !== 'uploaded' && job.state !== 'deleted');
+  $('video-permissions').textContent = (owner ? 'Bạn là admin: chỉ bạn được tải hoặc xóa. ' : 'Chỉ chủ phòng được tải hoặc xóa. ') + 'Phải lưu xong mọi video trước khi quay tiếp; lượt mới xóa video cũ đã lưu. Video lỗi chỉ bị bỏ khi admin chủ động xóa.';
+  $('record-all').disabled = !roomConnected || !owner || Boolean(currentTake?.active) || pendingUpload || !storageReady || !cameras.length || cameras.some(p => !p.camera?.ready);
   $('stop-all').disabled = !owner || !currentTake?.active;
   const settingsLocked = Boolean(currentTake?.active || recording.active);
   $('apply-camera').disabled = settingsLocked; $('reset-camera').disabled = settingsLocked;
@@ -427,11 +427,12 @@ function renderRoomVideos() {
     const clips = [...roomVideos.values()].filter(job => job.take === currentTake.id), uploaded = clips.filter(job => job.state === 'uploaded').length;
     $('take-status').textContent = uploaded === currentTake.cameraIds.length ? `Đã lưu ${uploaded}/${currentTake.cameraIds.length} video lên Neon` : `Đã dừng · ${uploaded}/${currentTake.cameraIds.length} video đã lưu Neon`;
   }
-  const stateLabels = { scheduled: 'Đếm ngược', receiving: 'Đang nhận dữ liệu', uploading: 'Đang lưu Neon', uploaded: 'Đã lưu Neon', 'upload-failed': 'Lỗi upload · thử lại trên máy quay' };
+  const stateLabels = { scheduled: 'Chờ ghi trên máy', receiving: 'Đang tải bản gốc từ máy quay', uploading: 'Đang lưu Neon', uploaded: 'Đã lưu Neon', 'upload-failed': 'Lỗi upload · thử lại trên máy quay' };
   for (const job of [...roomVideos.values()].reverse()) {
     const row = document.createElement('div'); row.className = 'room-recording';
     const text = document.createElement('span');
-    text.textContent = `${job.name} · CAM ${job.slot} · ${job.take} · ${job.captureState === 'failed' ? `Lỗi ghi: ${job.captureError}` : stateLabels[job.state] || job.state} · ${(job.bytes / 1048576).toFixed(1)} MB${job.capture?.width ? ` · ${job.capture.width}×${job.capture.height} · ${(job.capture.encoderBitrate / 1000000).toFixed(1)} Mbps` : ''}`;
+    const label = job.captureState === 'failed' ? `Lỗi ghi: ${job.captureError}` : job.state === 'scheduled' && job.captureState === 'recording' ? 'Đang ghi nét trên máy · chưa upload' : job.state === 'scheduled' && job.captureState === 'stopped' ? 'Đã dừng · chờ máy tải bản gốc lên' : stateLabels[job.state] || job.state;
+    text.textContent = `${job.name} · CAM ${job.slot} · ${job.take} · ${label} · Đã nhận ${(job.bytes / 1048576).toFixed(1)} MB${job.capture?.width ? ` · ${job.capture.width}×${job.capture.height} · ${(job.capture.encoderBitrate / 1000000).toFixed(1)} Mbps` : ''}`;
     row.append(text);
     if (hostId === me?.id && job.state === 'uploaded') {
       const button = document.createElement('button'); button.className = 'secondary'; button.textContent = 'Tải video Neon';
@@ -468,7 +469,7 @@ $('camera-config-form').onsubmit = async e => {
   e.preventDefault();
   const [width, height] = $('resolution').value.split('x').map(Number), advanced = {};
   for (const input of $('device-controls').querySelectorAll('[data-constraint]')) advanced[input.dataset.constraint] = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : input.value;
-  try { await api('camera-config', { id: $('config-target').value, config: { width, height, fps: Number($('fps').value), bitrate: Number($('record-bitrate').value), previewBitrate: Number($('preview-bitrate').value), audio: $('record-audio').checked, advanced } }); }
+  try { await api('camera-config', { id: $('config-target').value, config: { width, height, fps: Number($('fps').value), bitrate: Number($('record-bitrate').value), previewBitrate: Number($('preview-bitrate').value), previewFps: Number($('preview-fps').value), audio: $('record-audio').checked, advanced } }); }
   catch (error) { message(error.message); }
 };
 $('reset-camera').onclick = async () => {

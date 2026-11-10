@@ -122,7 +122,15 @@ test('next take deletes old recordings, revokes upload tokens, and scopes manual
     const first = (await post('recordings', {}, a)).body.recordings[0];
     await post('record/stop', {}, a);
     assert.equal((await post('record/delete', { id: first.id }, other)).status, 404);
-    const manifest = await records.load(first.id);
+    let startEvent;
+    do { startEvent = await ae.next(); } while (startEvent.type !== 'record-start');
+    // A deferred original must not be deleted by accidentally starting another take.
+    const blocked = await post('record/start', {}, a);
+    assert.equal(blocked.status, 409); assert.match(blocked.body.error, /chưa upload xong/);
+    assert.equal((await records.load(first.id)).state, 'scheduled');
+    assert.ok(!deleted.includes(first.id));
+    await records.chunk(first.id, startEvent.data.token, 0, Buffer.from('media'));
+    await records.complete(first.id, startEvent.data.token, { count: 1, mime: 'video/mp4' });
     // Token is delivered only to the camera; test creates another capability to exercise HTTP revocation.
     const stale = await records.create({ room: a.code, take: first.take, name: 'Test', slot: 1, peerId: a.id });
     await records.chunk(stale.id, stale.token, 0, Buffer.from('media'));

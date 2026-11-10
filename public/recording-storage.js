@@ -17,7 +17,7 @@ export function createLocalStore({ indexedDB = globalThis.indexedDB, maxMemoryBy
     }); } finally { db.close(); }
   }
   function fallback(job, error) {
-    if (!memoryJobs.has(job.id)) warn(`Bộ nhớ thiết bị lỗi (${error?.name || 'StorageError'}: ${error?.message || ''}). Đang giữ tạm trong RAM và gửi lên server; giữ trang mở đến khi lưu xong.`);
+    if (!memoryJobs.has(job.id)) warn(`Bộ nhớ thiết bị lỗi (${error?.name || 'StorageError'}: ${error?.message || ''}). Chỉ giữ tạm trong RAM (tối đa 64 MB); hãy quay ngắn, giữ trang mở và chờ upload sau khi dừng.`);
     const next = { ...job, volatile: true }; memoryJobs.set(job.id, next); cache.set(job.id, next); return next;
   }
   async function get(id) {
@@ -45,7 +45,7 @@ export function createLocalStore({ indexedDB = globalThis.indexedDB, maxMemoryBy
         Object.assign(job, next); cache.set(job.id, { ...next }); return;
       } catch (error) { if (removed.has(job.id)) throw error; fallback(job, error); }
     }
-    if (memoryBytes + data.byteLength > maxMemoryBytes) throw Error('Bộ nhớ tạm đã đầy (64 MB). Mạng upload quá chậm; dừng quay và chờ lưu.');
+    if (memoryBytes + data.byteLength > maxMemoryBytes) throw Error('Bộ nhớ tạm đã đầy (64 MB). Dừng quay; video chưa đầy đủ. Cần trình duyệt có bộ nhớ IndexedDB để quay dài.');
     memoryChunks.set(key, data); memoryBytes += data.byteLength;
     Object.assign(job, next, { volatile: true }); memoryJobs.set(job.id, { ...job }); cache.set(job.id, { ...job });
   }

@@ -1,5 +1,9 @@
 // Each camera has a separately versioned send connection to each peer.
 // A failed pair must never prevent negotiation with the other devices.
+export function lowBandwidthPreview({ bitrate = 100000, fps = 3 } = {}, network = {}) {
+  const slow = network.saveData || ['slow-2g', '2g'].includes(network.effectiveType);
+  return { bitrate: Math.min(bitrate, slow ? 80000 : 150000), fps: slow ? 2 : Math.min(5, Math.max(2, fps)), maxDimension: slow ? 320 : 480 };
+}
 export class CameraMesh {
   constructor({ selfId, peers, getStream, getConfiguration, getPreview, send, onStream, onState,
     createPeer = config => new RTCPeerConnection(config), setTimer = (fn, delay) => setTimeout(fn, delay), clearTimer = id => clearTimeout(id),
@@ -69,7 +73,7 @@ export class CameraMesh {
     const options = this.getPreview(), track = this.getStream()?.getVideoTracks()[0];
     const sender = pc.getSenders().find(sender => sender.track?.kind === 'video'); if (!sender) return;
     const params = sender.getParameters(); if (!params.encodings?.length) return;
-    params.degradationPreference = 'maintain-resolution';
+    params.degradationPreference = 'balanced';
     const settings = track?.getSettings?.() || {};
     const scale = Math.max(1, Math.max(settings.width || 0, settings.height || 0) / (options.maxDimension || 854));
     for (const encoding of params.encodings) { encoding.maxBitrate = options.bitrate; encoding.maxFramerate = options.fps || 15; encoding.scaleResolutionDownBy = scale; }
@@ -93,6 +97,8 @@ export class CameraMesh {
       pc = this.make(other, this.newId(), false, relay);
       for (const track of this.getStream().getVideoTracks()) pc.addTrack(track, this.getStream());
       await pc.setLocalDescription(await pc.createOffer());
+      // Cap the first frames too, rather than flooding a weak link at capture quality.
+      await this.applyPreview(pc).catch(() => {});
       if (!this.current(other, false, pc)) return;
       const state = this.states.get(pc);
       await this.send({ to: other, sender: this.selfId, connectionId: state.id, description: pc.localDescription });

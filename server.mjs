@@ -205,8 +205,13 @@ export const server = http.createServer(async (req, res) => {
       const take = { id: randomBytes(8).toString('hex'), scheduledAt: Date.now() + 3000, active: true, preparing: true, cameraIds: cameras.map(x => x.id) };
       // Reserve immediately to prevent two simultaneous starts while disk writes are pending.
       const previousTake = p.room.take; p.room.take = take; p.room.transitioning = true;
-      broadcast(p.room, 'take', take);
       try {
+        const pending = (await roomJobs(p.room)).filter(job => !['uploaded', 'deleted'].includes(job.state));
+        if (pending.length) {
+          p.room.take = previousTake;
+          return send(res, 409, { error: 'Video lượt trước chưa upload xong. Chờ mọi video báo Đã lưu Neon hoặc admin chủ động xóa video muốn bỏ trước khi quay tiếp.' });
+        }
+        broadcast(p.room, 'take', take);
         await purgeRoom(p.room);
         if (p.room.hostId !== p.id || cameras.some(camera => !p.room.peers.has(camera.id) || !camera.res || !camera.camera?.ready)) throw Error('Thiết bị đã rời phòng trong khi chuẩn bị.');
         p.room.latestTake = take.id; await saveRoom(p.room);
