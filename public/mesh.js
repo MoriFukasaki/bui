@@ -12,6 +12,12 @@ export class CameraMesh {
     const config = this.getConfiguration();
     return { iceServers: config.iceServers, iceTransportPolicy: relay && config.turnConfigured ? 'relay' : config.iceTransportPolicy || 'all' };
   }
+  // Retry quickly at first, then keep probing at a calm cadence.  Mobile radios
+  // often need more than three attempts to recover after switching cell/Wi-Fi.
+  retryDelay(attempt, firstDelay = 1000) {
+    if (attempt === 0) return firstDelay;
+    return [3000, 7000, 15000, 30000][Math.min(attempt - 1, 3)];
+  }
   current(other, receiving, pc) { return !this.closed && (receiving ? this.incoming : this.outgoing).get(other) === pc; }
   notify(other, direction, status) { if (!this.closed) this.onState?.(other, direction, status); }
   dispose(pc) {
@@ -74,6 +80,9 @@ export class CameraMesh {
       if (fallback.encodings?.length) { for (const encoding of fallback.encodings) encoding.maxBitrate = options.bitrate; await sender.setParameters(fallback); }
     }
   }
+  async refreshPreview() {
+    await Promise.allSettled([...this.outgoing.values()].map(pc => this.applyPreview(pc)));
+  }
   async ensureSender(other, { force = false, relay = false } = {}) {
     if (this.closed || !this.peers.has(other) || !this.getStream()) return;
     const old = this.outgoing.get(other);
@@ -104,13 +113,14 @@ export class CameraMesh {
   }
   waitForOffer(other) {
     if (this.closed || this.incoming.has(other) || this.requestTimers.has(other)) return;
+    const key = `true:${other}`, attempts = this.retries.get(key) || 0;
     const timer = this.setTimer(() => {
       this.requestTimers.delete(other);
       if (this.incoming.has(other)) return;
-      const key = `true:${other}`, attempts = this.retries.get(key) || 0;
-      if (attempts >= 3) { this.notify(other, 'receive', 'failed'); return; }
       this.retries.set(key, attempts + 1); this.requestOffer(other).catch(() => this.waitForOffer(other));
-    }, 12000);
+      // Do not give up permanently: a phone can regain data several minutes later.
+      if (attempts >= 2) this.notify(other, 'receive', 'failed');
+    }, attempts === 0 ? 12000 : this.retryDelay(attempts, 12000));
     this.requestTimers.set(other, timer);
   }
   retry(other, receiving, pc, delay = 1000) {
@@ -118,8 +128,9 @@ export class CameraMesh {
     const state = this.states.get(pc), key = `${receiving}:${other}`;
     this.clearTimer(state.timer);
     const attempts = this.retries.get(key) || 0;
-    if (attempts >= 3) { state.timer = null; this.notify(other, receiving ? 'receive' : 'send', 'failed'); return; }
-    this.notify(other, receiving ? 'receive' : 'send', 'retrying');
+    // Keep a low-rate retry alive indefinitely.  Stopping at three attempts made
+    // a camera appear permanently blank after a short weak-network outage.
+    this.notify(other, receiving ? 'receive' : 'send', attempts >= 3 ? 'failed' : 'retrying');
     state.timer = this.setTimer(() => {
       state.timer = null;
       if (!this.current(other, receiving, pc)) return;
@@ -128,7 +139,7 @@ export class CameraMesh {
         if (this.current(other, true, pc)) state.timer = this.setTimer(() => { state.timer = null; this.retry(other, true, pc); }, 20000);
       }).catch(() => this.retry(other, true, pc));
       else this.ensureSender(other, { force: true, relay: true });
-    }, delay);
+    }, attempts === 0 ? delay : this.retryDelay(attempts, delay));
   }
   async requestOffer(other) {
     if (this.closed || this.peers.get(other)?.role !== 'camera') return;

@@ -19,6 +19,23 @@ const shareCode = new URL(location.href).searchParams.get('room');
 if (shareCode) $('room-code').value = shareCode;
 $('name').value = localStorage.getItem('camroom-name') || '';
 
+// Preview is a separate, per-viewer WebRTC stream.  On a weak mobile link a
+// camera must upload that stream once for every other participant, so favour
+// continuity over sharpness.  The recorded source keeps its configured bitrate.
+function previewProfile() {
+  const network = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  const type = network?.effectiveType;
+  const slow = network?.saveData || type === 'slow-2g' || type === '2g' || Number(network?.downlink) > 0 && Number(network.downlink) <= 1;
+  const limited = type === '3g' || Number(network?.downlink) > 0 && Number(network.downlink) <= 2;
+  const bitrate = Math.min(cameraOptions.previewBitrate, slow ? 120000 : limited ? 220000 : cameraOptions.previewBitrate);
+  return {
+    bitrate,
+    fps: slow ? 8 : limited ? 12 : me?.maxCameras > 3 ? 15 : 24,
+    maxDimension: slow ? 480 : limited ? 640 : me?.maxCameras > 3 ? 854 : 1280,
+    limited: Boolean(slow || limited),
+  };
+}
+
 async function api(path, data, session = me) {
   const res = await fetch(`/api/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(session ? { Authorization: `Bearer ${session.token}` } : {}) }, body: JSON.stringify(data), signal: AbortSignal.timeout(path === 'signal' ? 10000 : ['record/start', 'record/delete'].includes(path) ? 180000 : 30000) });
   const result = await res.json(); if (!res.ok) throw Error(result.error || 'Không kết nối được máy chủ.'); return result;
@@ -48,7 +65,7 @@ async function join(create = false) {
     me = await api('join', { create, code, role, name: $('name').value, maxCameras: Number($('max-cameras').value) }, null);
     const session = me;
     mesh = new CameraMesh({ selfId: me.id, peers, getStream: () => stream, getConfiguration: () => session,
-      getPreview: () => ({ bitrate: cameraOptions.previewBitrate, fps: me?.maxCameras > 3 ? 15 : 24, maxDimension: me?.maxCameras > 3 ? 854 : 1280 }),
+      getPreview: previewProfile,
       send: data => api('signal', data, session), onStream: attachRemoteStream, onState: connectionState });
     hostId = me.hostId; storageReady = me.storage; currentTake = me.take; latestTake = me.latestTake; armed = false;
     await recording.reconcile(me.code, latestTake, (me.recordings || []).map(job => job.id));
@@ -135,7 +152,9 @@ function updateNetworkNote() {
   if (!me) return;
   const cameras = [...peers.values()].filter(p => p.role === 'camera');
   const received = cameras.filter(p => { const video = document.getElementById(`video-${p.id}`); return video?.srcObject && video.readyState >= 2 && !video.paused; }).length;
-  $('network-status').textContent = `Đang xem ${received}/${cameras.length} camera khác. ${me.turnConfigured ? 'Đã cấu hình chuyển tiếp mạng (TURN).' : 'Chưa có TURN: các máy khác Wi-Fi hoặc 4G/5G có thể không thấy nhau. Cần cấu hình TURN trên server.'}`;
+  const profile = previewProfile();
+  const quality = profile.limited ? ` Mạng yếu: xem trước tự hạ còn ${(profile.bitrate / 1000).toFixed(0)} kbps để giữ kết nối; video lưu không đổi chất lượng.` : '';
+  $('network-status').textContent = `Đang xem ${received}/${cameras.length} camera khác. ${me.turnConfigured ? 'Đã cấu hình chuyển tiếp mạng (TURN).' : 'Chưa có TURN: các máy khác Wi-Fi hoặc 4G/5G có thể không thấy nhau. Cần cấu hình TURN trên server.'}${quality}`;
 }
 function connectionState(other, direction, state) {
   const card = document.getElementById(`cam-${other}`); if (!card) return;
@@ -415,6 +434,11 @@ $('record-all').onclick = async () => { $('record-all').disabled = true; try { a
 $('stop-all').onclick = async () => { $('stop-all').disabled = true; try { await api('record/stop', {}); } catch (e) { message(e.message); updateRecordingUI(); } };
 const recoverConnections = () => { if (mesh) for (const peer of peers.values()) mesh.reconnect(peer.id); };
 window.addEventListener('online', recoverConnections);
+const networkInfo = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+networkInfo?.addEventListener?.('change', () => {
+  mesh?.refreshPreview();
+  updateNetworkNote();
+});
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && mesh) {
   for (const [other, pc] of mesh.incoming) if (pc.connectionState === 'failed' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') mesh.reconnect(other);
 } });

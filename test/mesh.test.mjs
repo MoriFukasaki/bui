@@ -103,6 +103,23 @@ test('failed sender retries only that direction, uses relay fallback, and ignore
     assert.equal(incoming.candidates.length, count);
   } finally { net.close(); }
 });
+test('a weak-network failure keeps a low-rate reconnect timer after the initial retries', async () => {
+  const net = network(2, { turn: true });
+  try {
+    await Promise.all(net.nodes.map(node => node.mesh.connectAll())); await net.flush();
+    const sender = net.nodes[0].mesh;
+    // Four consecutive failures used to leave this direction permanently dead.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const pc = sender.outgoing.get('device-1'); pc.failed();
+      const entry = [...net.nodes[0].timers].find(([, timer]) => [1000, 3000, 7000, 15000, 30000].includes(timer.delay));
+      assert.ok(entry, `retry ${attempt + 1} must be scheduled`);
+      net.nodes[0].timers.delete(entry[0]); entry[1].fn();
+      await new Promise(resolve => setImmediate(resolve)); await net.flush();
+    }
+    sender.outgoing.get('device-1').failed();
+    assert.ok([...net.nodes[0].timers.values()].some(timer => timer.delay === 30000), 'continues probing instead of giving up');
+  } finally { net.close(); }
+});
 test('a receiver can request a new offer and closed sessions reject late traffic', async () => {
   const net = network(2);
   try {
